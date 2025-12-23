@@ -334,10 +334,6 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const handleEraser = useCallback((x: number, y: number, pressure: number = 1) => {
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
     
-    // Apply pressure-based size adjustment (0.5x to 2x based on pressure)
-    const pressureMultiplier = Math.max(0.5, Math.min(2, pressure));
-    const adjustedEraserSize = eraserSize * pressureMultiplier;
-    
     // Update eraser pressure for visual feedback
     setEraserPressure(pressure);
     
@@ -362,64 +358,50 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       hasChanges = true;
     }
 
-    // For freehand paths - create eraser stroke for partial erasing
-    if (!currentEraserPath) {
-      // Start new eraser stroke
-      const eraserStroke: DrawingElement = {
-        id: generateId(),
-        type: 'path',
-        data: { d: `M${canvasPoint.x},${canvasPoint.y}` },
-        strokeColor: '#000000', // Color doesn't matter for eraser strokes
-        fillColor: undefined,
-        strokeWidth: adjustedEraserSize,
-        transform: createDefaultTransform(),
-        timestamp: Date.now(),
-        isEraser: true, // Mark as eraser stroke
-      };
-      
-      setElements(prev => [...prev, eraserStroke]);
-      setCurrentEraserPath(eraserStroke.id);
-      hasChanges = true;
-    }
-
     // Store current position for next interpolation
     setLastEraserPosition({ x, y });
     
     return hasChanges;
-  }, [elements, canvasTransform, eraserSize, lastEraserPosition, currentEraserPath]);
+  }, [elements, canvasTransform, lastEraserPosition]);
 
   // Continue eraser stroke for freehand erasing
   const continueEraserStroke = useCallback((x: number, y: number, pressure: number = 1) => {
-    if (!currentEraserPath) return false;
-    
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
-    const pressureMultiplier = Math.max(0.5, Math.min(2, pressure));
-    const adjustedEraserSize = eraserSize * pressureMultiplier;
     
-    // Continue the eraser path
-    setElements(prev => prev.map(element => {
-      if (element.id === currentEraserPath && element.type === 'path' && element.isEraser) {
-        return {
-          ...element,
-          data: { ...element.data, d: `${element.data.d} L${canvasPoint.x},${canvasPoint.y}` },
-          strokeWidth: adjustedEraserSize,
-        };
+    // Update eraser pressure for visual feedback
+    setEraserPressure(pressure);
+    
+    let hasChanges = false;
+    const elementsToRemove: string[] = [];
+    
+    // Check for shapes and text - instant delete on hit (keep existing behavior)
+    elements.forEach(element => {
+      if ((element.type === 'shape' || element.type === 'text') && 
+          isPointInElement(canvasPoint.x, canvasPoint.y, element)) {
+        if (!elementsToRemove.includes(element.id)) {
+          elementsToRemove.push(element.id);
+          hasChanges = true;
+        }
       }
-      return element;
-    }));
+    });
+
+    // Remove shapes and text that were hit
+    if (elementsToRemove.length > 0) {
+      setElements(prev => prev.filter(element => !elementsToRemove.includes(element.id)));
+      setSelectedElementId(null);
+    }
     
     setLastEraserPosition({ x, y });
-    return true;
-  }, [currentEraserPath, canvasTransform, eraserSize]);
+    return hasChanges;
+  }, [canvasTransform, elements]);
 
   // End eraser stroke
   const endEraserStroke = useCallback(() => {
-    if (currentEraserPath) {
-      setCurrentEraserPath(null);
-      setLastEraserPosition(null);
-      addToHistory(); // Add eraser stroke to history for undo/redo
-    }
-  }, [currentEraserPath, addToHistory]);
+    // Reset eraser state
+    setCurrentEraserPath(null);
+    setLastEraserPosition(null);
+    // History is handled by the batching timeout
+  }, []);
 
   // Get resize handles for selected shape
   const getResizeHandles = (element: DrawingElement): { x: number; y: number; handle: string }[] => {
@@ -945,7 +927,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         // Extract pressure from touch event (if available)
         const pressure = evt.nativeEvent.force || 1;
         
-        // Start eraser stroke - this handles both shapes and freehand
+        // Start eraser stroke using currentPath system
+        setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
+        
+        // Also handle instant deletion of shapes/text
         const erased = handleEraser(x, y, pressure);
         
         if (erased) {
@@ -1022,6 +1007,33 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           break;
         
         case 'line':
+          if (startPoint) {
+            // Line tool: use exact start and end coordinates, no normalization
+            const shapeData = {
+              shape: 'line',
+              x: startPoint.x,  // x1 - start point
+              y: startPoint.y,  // y1 - start point
+              x2: canvasPoint.x, // x2 - end point
+              y2: canvasPoint.y, // y2 - end point
+              width: Math.abs(canvasPoint.x - startPoint.x), // For selection bounds
+              height: Math.abs(canvasPoint.y - startPoint.y), // For selection bounds
+            };
+
+            const previewShape: DrawingElement = {
+              id: 'preview',
+              type: 'shape',
+              data: shapeData,
+              strokeColor,
+              fillColor: undefined,
+              strokeWidth: brushSize,
+              transform: createDefaultTransform(),
+              timestamp: Date.now(),
+            };
+            
+            setCurrentShape(previewShape);
+          }
+          break;
+        
         case 'rect':
         case 'square':
         case 'circle':
@@ -1044,10 +1056,6 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
               y: Math.min(startPoint.y, canvasPoint.y),
               width: size || width,
               height: size || height,
-              ...(selectedTool === 'line' && {
-                x2: canvasPoint.x,
-                y2: canvasPoint.y,
-              }),
             };
 
             const previewShape: DrawingElement = {
@@ -1068,12 +1076,15 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     } else if (isErasing) {
       setEraserPosition({ x, y });
       
+      // Continue the eraser path
+      setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
+      
       // Extract pressure from touch event (if available)
       const pressure = evt.nativeEvent.force || 1;
       
-      // Continue eraser stroke for partial erasing
-      const continued = continueEraserStroke(x, y, pressure);
-      if (continued) {
+      // Continue erasing shapes/text
+      const erased = continueEraserStroke(x, y, pressure);
+      if (erased) {
         // Batch history updates during continuous erasing
         if (eraserBatchTimeout) {
           clearTimeout(eraserBatchTimeout);
@@ -1106,8 +1117,27 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       setEraserAnimationScale(1); // Reset scale
       setEraserPressure(1); // Reset pressure
       
-      // End eraser stroke if one was active
+      // Create eraser stroke from current path
+      if (currentPath && currentPath.length >= 4) {
+        const eraserStroke: DrawingElement = {
+          id: generateId(),
+          type: 'path',
+          data: { d: currentPath },
+          strokeColor: '#000000', // Color doesn't matter for eraser strokes
+          fillColor: undefined,
+          strokeWidth: eraserSize,
+          transform: createDefaultTransform(),
+          timestamp: Date.now(),
+          isEraser: true, // Mark as eraser stroke
+        };
+        setElements(prev => [...prev, eraserStroke]);
+      }
+      
+      // End eraser stroke
       endEraserStroke();
+      
+      // Clear current path
+      setCurrentPath('');
       
       // Ensure final history update for eraser session
       if (eraserBatchTimeout) {
@@ -1256,6 +1286,11 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           
           // Extract pressure from touch event (if available)
           const pressure = evt.nativeEvent.force || 1;
+          
+          // Start eraser stroke using currentPath system
+          setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
+          
+          // Also handle instant deletion of shapes/text
           const erased = handleEraser(x, y, pressure);
           
           if (erased) {
@@ -1386,6 +1421,33 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
               break;
             
             case 'line':
+              if (startPoint) {
+                // Line tool: use exact start and end coordinates, no normalization
+                const shapeData = {
+                  shape: 'line',
+                  x: startPoint.x,  // x1 - start point
+                  y: startPoint.y,  // y1 - start point
+                  x2: canvasPoint.x, // x2 - end point
+                  y2: canvasPoint.y, // y2 - end point
+                  width: Math.abs(canvasPoint.x - startPoint.x), // For selection bounds
+                  height: Math.abs(canvasPoint.y - startPoint.y), // For selection bounds
+                };
+
+                const previewShape: DrawingElement = {
+                  id: 'preview',
+                  type: 'shape',
+                  data: shapeData,
+                  strokeColor,
+                  fillColor: undefined,
+                  strokeWidth: brushSize,
+                  transform: createDefaultTransform(),
+                  timestamp: Date.now(),
+                };
+                
+                setCurrentShape(previewShape);
+              }
+              break;
+            
             case 'rect':
             case 'square':
             case 'circle':
@@ -1408,10 +1470,6 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
                   y: Math.min(startPoint.y, canvasPoint.y),
                   width: size || width,
                   height: size || height,
-                  ...(selectedTool === 'line' && {
-                    x2: canvasPoint.x,
-                    y2: canvasPoint.y,
-                  }),
                 };
 
                 const previewShape: DrawingElement = {
@@ -1433,12 +1491,15 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           // Continue erasing while dragging
           setEraserPosition({ x, y });
           
+          // Continue the eraser path
+          setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
+          
           // Extract pressure from touch event (if available)
           const pressure = evt.nativeEvent.force || 1;
           
-          // Continue eraser stroke for partial erasing
-          const continued = continueEraserStroke(x, y, pressure);
-          if (continued) {
+          // Continue erasing shapes/text
+          const erased = continueEraserStroke(x, y, pressure);
+          if (erased) {
             // Batch history updates during continuous erasing
             if (eraserBatchTimeout) {
               clearTimeout(eraserBatchTimeout);
@@ -1481,8 +1542,27 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         setEraserAnimationScale(1); // Reset scale
         setEraserPressure(1); // Reset pressure
         
-        // End eraser stroke if one was active
+        // Create eraser stroke from current path
+        if (currentPath && currentPath.length >= 4) {
+          const eraserStroke: DrawingElement = {
+            id: generateId(),
+            type: 'path',
+            data: { d: currentPath },
+            strokeColor: '#000000', // Color doesn't matter for eraser strokes
+            fillColor: undefined,
+            strokeWidth: eraserSize,
+            transform: createDefaultTransform(),
+            timestamp: Date.now(),
+            isEraser: true, // Mark as eraser stroke
+          };
+          setElements(prev => [...prev, eraserStroke]);
+        }
+        
+        // End eraser stroke
         endEraserStroke();
+        
+        // Clear current path
+        setCurrentPath('');
         
         // Ensure final history update for eraser session
         if (eraserBatchTimeout) {
@@ -1512,6 +1592,17 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
             break;
 
           case 'line':
+            if (startPoint && currentShape) {
+              // Lines don't need minimum size check - any line is valid
+              const finalShape: DrawingElement = {
+                ...currentShape,
+                id: generateId(),
+              };
+              setElements(prev => [...prev, finalShape]);
+              addToHistory();
+            }
+            break;
+            
           case 'rect':
           case 'square':
           case 'circle':
@@ -1690,10 +1781,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
               elements={elements}
               backgroundColor={backgroundColor}
               canvasTransform={{ scale: 1, translateX: 0, translateY: 0 }} // Reset transform for inner canvas
-              currentPath={selectedTool === 'eraser' && currentEraserPath ? '' : currentPath} // Show eraser path as element
+              currentPath={currentPath}
               currentPathColor={strokeColor}
-              currentPathWidth={selectedTool === 'eraser' ? eraserSize : brushSize}
-              currentPathIsEraser={selectedTool === 'eraser' && isErasing && !currentEraserPath}
+              currentPathWidth={brushSize}
+              currentPathIsEraser={selectedTool === 'eraser' && isErasing}
               currentShape={currentShape}
               selectedElementId={selectedElementId}
               isDragging={isDragging}

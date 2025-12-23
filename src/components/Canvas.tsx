@@ -57,7 +57,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
         // Validate path data before rendering
         if (!element.data.d || element.data.d.length < 5) return null;
         
-        // Skip eraser strokes in normal rendering - they are used only for masking
+        // Skip eraser strokes completely - they should not exist in this approach
         if (element.isEraser === true) return null;
         
         return (
@@ -332,7 +332,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
           <Mask id="eraserMask">
             {/* White background allows everything through */}
             <Rect x="0" y="0" width={width} height={height} fill="white" />
-            {/* Black eraser strokes block content */}
+            {/* Black eraser strokes block content (create holes) */}
             <G transform={`translate(${canvasTransform.translateX}, ${canvasTransform.translateY}) scale(${canvasTransform.scale})`}>
               {elements
                 .filter(element => element.type === 'path' && element.isEraser === true)
@@ -348,7 +348,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
                     transform={`translate(${element.transform.translateX}, ${element.transform.translateY}) scale(${element.transform.scale})`}
                   />
                 ))}
-              {/* Current eraser path */}
+              {/* Current eraser path - add to mask */}
               {currentPath && currentPathIsEraser && (
                 <Path
                   d={currentPath}
@@ -363,11 +363,15 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
           </Mask>
         </Defs>
         
-        <G 
-          transform={`translate(${canvasTransform.translateX}, ${canvasTransform.translateY}) scale(${canvasTransform.scale})`}
-          mask="url(#eraserMask)"
-        >
-          {elements.filter(element => element.type !== 'text').map(renderElement)}
+        {/* Only apply mask to freehand paths, not shapes */}
+        <G transform={`translate(${canvasTransform.translateX}, ${canvasTransform.translateY}) scale(${canvasTransform.scale})`}>
+          {/* Render shapes without mask (so they can be deleted instantly) */}
+          {elements.filter(element => element.type === 'shape').map(renderElement)}
+          
+          {/* Render freehand paths with mask (for partial erasing) */}
+          <G mask="url(#eraserMask)">
+            {elements.filter(element => element.type === 'path' && !element.isEraser).map(renderElement)}
+          </G>
           
           {/* Current drawing path - validate before rendering */}
           {currentPath && currentPath.length >= 5 && !currentPathIsEraser && (
