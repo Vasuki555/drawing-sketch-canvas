@@ -95,7 +95,7 @@ export const isPointInItem = (x: number, y: number, item: CanvasItem): boolean =
 };
 
 // Extract coordinates from SVG path string
-const extractPathCoordinates = (pathString: string): { x: number; y: number }[] => {
+export const extractPathCoordinates = (pathString: string): { x: number; y: number }[] => {
   const coords: { x: number; y: number }[] = [];
   
   // Simple regex to extract numbers from path

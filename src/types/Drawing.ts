@@ -58,7 +58,7 @@ export interface TextElement extends DrawingElement {
 
 export interface DrawingState {
   id: string;
-  name: string;
+  name: string; // This serves as the drawing title
   elements: DrawingElement[];
   backgroundColor: string;
   canvasTransform: Transform;
@@ -71,7 +71,7 @@ export interface DrawingState {
 
 export interface SavedDrawing {
   id: string;
-  name: string;
+  name: string; // This serves as the drawing title
   previewUri: string;
   stateUri: string;
   createdAt: number;
@@ -86,3 +86,35 @@ export interface AppSettings {
   defaultBrushSize: number;
   defaultEraserSize: number;
 }
+
+// Utility function to generate default drawing titles
+export const generateDefaultTitle = (index?: number): string => {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US', { 
+    month: 'short', 
+    day: 'numeric', 
+    year: 'numeric' 
+  });
+  const timeStr = now.toLocaleTimeString('en-US', { 
+    hour: '2-digit', 
+    minute: '2-digit',
+    hour12: false 
+  });
+  
+  if (index !== undefined && index > 0) {
+    return `Untitled Drawing ${index + 1}`;
+  }
+  
+  return `Sketch – ${dateStr} ${timeStr}`;
+};
+
+// Utility function to ensure drawing has a proper title (backward compatibility)
+export const ensureDrawingTitle = (drawing: SavedDrawing): SavedDrawing => {
+  if (!drawing.name || drawing.name.trim() === '') {
+    return {
+      ...drawing,
+      name: generateDefaultTitle()
+    };
+  }
+  return drawing;
+};

@@ -55,7 +55,9 @@ const TextInputModal: React.FC<TextInputModalProps> = ({
         />
         
         <View style={styles.modal}>
-          <Text style={styles.title}>Enter Text</Text>
+          <Text style={styles.title}>
+            {initialText ? 'Edit Text' : 'Enter Text'}
+          </Text>
           
           <TextInput
             style={styles.textInput}
@@ -73,7 +75,9 @@ const TextInputModal: React.FC<TextInputModalProps> = ({
             </TouchableOpacity>
             
             <TouchableOpacity style={styles.saveButton} onPress={handleSave}>
-              <Text style={styles.saveText}>Save</Text>
+              <Text style={styles.saveText}>
+                {initialText ? 'Update' : 'Save'}
+              </Text>
             </TouchableOpacity>
           </View>
         </View>

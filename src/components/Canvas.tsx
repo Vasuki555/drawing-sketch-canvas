@@ -57,7 +57,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
         // Validate path data before rendering
         if (!element.data.d || element.data.d.length < 5) return null;
         
-        // Skip eraser strokes completely - they should not exist in this approach
+        // Skip eraser strokes - they don't exist in path segmentation approach
         if (element.isEraser === true) return null;
         
         return (
@@ -273,6 +273,7 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
                 transform: [{ scale: element.transform.scale * canvasTransform.scale }],
               },
             ]}
+            pointerEvents="none" // Allow touch events to pass through to canvas
           >
             <View
               style={[
@@ -320,58 +321,17 @@ const Canvas = forwardRef<CanvasRef, CanvasProps>(({
       ]}
       onLayout={onLayout}
     >
-      {/* SVG Canvas - With eraser masking for partial erasing */}
+      {/* SVG Canvas - Clean rendering without eraser masking */}
       <Svg
         width={width}
         height={height}
         key={elements.length} // Force re-render on state change
         style={Platform.OS === 'web' ? undefined : StyleSheet.absoluteFillObject}
       >
-        <Defs>
-          {/* Create mask for eraser strokes */}
-          <Mask id="eraserMask">
-            {/* White background allows everything through */}
-            <Rect x="0" y="0" width={width} height={height} fill="white" />
-            {/* Black eraser strokes block content (create holes) */}
-            <G transform={`translate(${canvasTransform.translateX}, ${canvasTransform.translateY}) scale(${canvasTransform.scale})`}>
-              {elements
-                .filter(element => element.type === 'path' && element.isEraser === true)
-                .map(element => (
-                  <Path
-                    key={element.id}
-                    d={element.data.d}
-                    stroke="black"
-                    strokeWidth={element.strokeWidth}
-                    fill="transparent"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    transform={`translate(${element.transform.translateX}, ${element.transform.translateY}) scale(${element.transform.scale})`}
-                  />
-                ))}
-              {/* Current eraser path - add to mask */}
-              {currentPath && currentPathIsEraser && (
-                <Path
-                  d={currentPath}
-                  stroke="black"
-                  strokeWidth={currentPathWidth || 2}
-                  fill="transparent"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              )}
-            </G>
-          </Mask>
-        </Defs>
-        
-        {/* Only apply mask to freehand paths, not shapes */}
+        {/* Render all elements without masking */}
         <G transform={`translate(${canvasTransform.translateX}, ${canvasTransform.translateY}) scale(${canvasTransform.scale})`}>
-          {/* Render shapes without mask (so they can be deleted instantly) */}
-          {elements.filter(element => element.type === 'shape').map(renderElement)}
-          
-          {/* Render freehand paths with mask (for partial erasing) */}
-          <G mask="url(#eraserMask)">
-            {elements.filter(element => element.type === 'path' && !element.isEraser).map(renderElement)}
-          </G>
+          {/* Render all elements (shapes, paths, etc.) */}
+          {elements.map(renderElement)}
           
           {/* Current drawing path - validate before rendering */}
           {currentPath && currentPath.length >= 5 && !currentPathIsEraser && (

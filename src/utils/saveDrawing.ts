@@ -286,8 +286,12 @@ export const getSavedDrawings = async (): Promise<SavedDrawing[]> => {
     // Update local index with merged results
     await saveDrawingsIndexLocal(uniqueDrawings);
     
-    // Sort by updatedAt descending (newest first)
-    return uniqueDrawings.sort((a, b) => b.updatedAt - a.updatedAt);
+    // Sort by updatedAt descending (newest first), with fallback to createdAt
+    return uniqueDrawings.sort((a, b) => {
+      const aTimestamp = a.updatedAt ?? a.createdAt;
+      const bTimestamp = b.updatedAt ?? b.createdAt;
+      return bTimestamp - aTimestamp; // Descending order (newest first)
+    });
   } catch (error) {
     console.error('Error getting saved drawings:', error);
     return [];
@@ -297,3 +301,4 @@ export const getSavedDrawings = async (): Promise<SavedDrawing[]> => {
 // Legacy exports for backward compatibility
 export const saveDrawingState = saveDrawingStateLocal;
 export const savePreviewImage = savePreviewImageLocal;
+export { saveDrawingsIndexLocal };

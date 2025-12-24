@@ -10,12 +10,14 @@ import {
   Dimensions,
   RefreshControl,
   Modal,
-  StatusBar
+  StatusBar,
+  TextInput,
+  Share
 } from "react-native";
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
-import { getSavedDrawings, deleteDrawing } from '../utils/saveDrawing';
-import { SavedDrawing } from '../types/Drawing';
+import { getSavedDrawings, deleteDrawing, saveDrawingsIndexLocal } from '../utils/saveDrawing';
+import { SavedDrawing, ensureDrawingTitle } from '../types/Drawing';
 import { useSettings } from '../contexts/SettingsContext';
 
 const { width, height } = Dimensions.get('window');
@@ -28,12 +30,30 @@ export default function GalleryScreen({ navigation }: any) {
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [selectedDrawing, setSelectedDrawing] = useState<SavedDrawing | null>(null);
   const [showFullScreen, setShowFullScreen] = useState<boolean>(false);
+  
+  // Multi-select state
+  const [isSelectionMode, setIsSelectionMode] = useState<boolean>(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  
+  // Title editing state
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState<string>('');
 
   // Load saved drawings
   const loadDrawings = async () => {
     try {
       const savedDrawings = await getSavedDrawings();
-      setDrawings(savedDrawings.reverse()); // Show newest first
+      // Ensure all drawings have proper titles (backward compatibility)
+      const drawingsWithTitles = savedDrawings.map(ensureDrawingTitle);
+      
+      // Sort drawings by most recent first (updatedAt ?? createdAt) in descending order
+      const sortedDrawings = drawingsWithTitles.sort((a, b) => {
+        const aTimestamp = a.updatedAt ?? a.createdAt;
+        const bTimestamp = b.updatedAt ?? b.createdAt;
+        return bTimestamp - aTimestamp; // Descending order (newest first)
+      });
+      
+      setDrawings(sortedDrawings);
     } catch (error) {
       console.error('Error loading drawings:', error);
       Alert.alert("Error", "Failed to load drawings.");
@@ -41,6 +61,145 @@ export default function GalleryScreen({ navigation }: any) {
       setLoading(false);
       setRefreshing(false);
     }
+  };
+
+  // Toggle selection mode
+  const toggleSelectionMode = () => {
+    setIsSelectionMode(!isSelectionMode);
+    setSelectedIds([]);
+  };
+
+  // Handle long press to enter selection mode
+  const handleLongPress = (drawingId: string) => {
+    if (!isSelectionMode) {
+      setIsSelectionMode(true);
+      setSelectedIds([drawingId]);
+    }
+  };
+
+  // Toggle selection of a drawing
+  const toggleSelection = (drawingId: string) => {
+    if (isSelectionMode) {
+      setSelectedIds(prev => 
+        prev.includes(drawingId) 
+          ? prev.filter(id => id !== drawingId)
+          : [...prev, drawingId]
+      );
+    }
+  };
+
+  // Delete multiple selected drawings
+  const deleteSelectedDrawings = async () => {
+    if (selectedIds.length === 0) return;
+
+    Alert.alert(
+      "Delete Drawings",
+      `Are you sure you want to delete ${selectedIds.length} drawing${selectedIds.length > 1 ? 's' : ''}?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              // Delete all selected drawings
+              for (const drawingId of selectedIds) {
+                await deleteDrawing(drawingId);
+              }
+              
+              // Exit selection mode and reload
+              setIsSelectionMode(false);
+              setSelectedIds([]);
+              await loadDrawings();
+              
+            } catch (error) {
+              console.error('Error deleting drawings:', error);
+              Alert.alert("Error", "Failed to delete some drawings.");
+              loadDrawings();
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  // Share multiple selected drawings
+  const shareSelectedDrawings = async () => {
+    if (selectedIds.length === 0) return;
+
+    try {
+      const selectedDrawings = drawings.filter(d => selectedIds.includes(d.id));
+      const imageUris = selectedDrawings.map(d => d.previewUri);
+      
+      await Share.share({
+        title: `${selectedDrawings.length} Drawing${selectedDrawings.length > 1 ? 's' : ''}`,
+        message: `Sharing ${selectedDrawings.length} drawing${selectedDrawings.length > 1 ? 's' : ''} from Drawing App`,
+        url: imageUris[0], // Share first image, platform limitations
+      });
+      
+      // Exit selection mode
+      setIsSelectionMode(false);
+      setSelectedIds([]);
+      
+    } catch (error) {
+      console.error('Error sharing drawings:', error);
+      Alert.alert("Error", "Failed to share drawings.");
+    }
+  };
+
+  // Start editing title
+  const startEditingTitle = (drawing: SavedDrawing) => {
+    setEditingTitleId(drawing.id);
+    setEditingTitle(drawing.name);
+  };
+
+  // Save title edit
+  const saveTitle = async () => {
+    if (!editingTitleId || !editingTitle.trim()) {
+      setEditingTitleId(null);
+      setEditingTitle('');
+      return;
+    }
+
+    try {
+      // Find the drawing being edited
+      const drawingToUpdate = drawings.find(d => d.id === editingTitleId);
+      if (!drawingToUpdate) return;
+
+      // Update the drawing name and updatedAt timestamp
+      const updatedDrawings = drawings.map(drawing => 
+        drawing.id === editingTitleId 
+          ? { ...drawing, name: editingTitle.trim(), updatedAt: Date.now() }
+          : drawing
+      );
+      
+      // Sort the updated drawings to move the edited one to the top
+      const sortedDrawings = updatedDrawings.sort((a, b) => {
+        const aTimestamp = a.updatedAt ?? a.createdAt;
+        const bTimestamp = b.updatedAt ?? b.createdAt;
+        return bTimestamp - aTimestamp; // Descending order (newest first)
+      });
+
+      // Update local state with sorted drawings
+      setDrawings(sortedDrawings);
+      
+      // Save to local storage immediately
+      await saveDrawingsIndexLocal(sortedDrawings);
+      
+      setEditingTitleId(null);
+      setEditingTitle('');
+    } catch (error) {
+      console.error('Error updating title:', error);
+      Alert.alert("Error", "Failed to update title.");
+      // Reload to restore original state
+      loadDrawings();
+    }
+  };
+
+  // Cancel title edit
+  const cancelTitleEdit = () => {
+    setEditingTitleId(null);
+    setEditingTitle('');
   };
 
   // 🎯 Use useFocusEffect to reload when screen comes into focus
@@ -154,48 +313,97 @@ export default function GalleryScreen({ navigation }: any) {
   };
 
   // Render individual drawing item
-  const renderDrawingItem = ({ item }: { item: SavedDrawing }) => (
-    <TouchableOpacity 
-      style={styles.drawingItem}
-      onPress={() => openFullScreen(item)}
-      activeOpacity={0.8}
-    >
-      <Image 
-        source={{ uri: item.previewUri }} 
-        style={styles.drawingImage}
-        resizeMode="cover"
-      />
-      <View style={styles.drawingInfo}>
-        <Text style={styles.drawingName} numberOfLines={1}>
-          {item.name}
-        </Text>
-        <Text style={styles.drawingDate}>
-          {new Date(item.updatedAt).toLocaleDateString()}
-        </Text>
-        
-        {/* 🆕 Editability indicator */}
-        <View style={styles.editabilityIndicator}>
-          <Text style={[
-            styles.editabilityText, 
-            item.hasState ? styles.editableText : styles.viewOnlyText
-          ]}>
-            {item.hasState ? '✏️ Editable' : '👁️ View Only'}
-          </Text>
-        </View>
-      </View>
-      
-      {/* Quick delete button */}
+  const renderDrawingItem = ({ item }: { item: SavedDrawing }) => {
+    const isSelected = selectedIds.includes(item.id);
+    const isEditingThisTitle = editingTitleId === item.id;
+    
+    return (
       <TouchableOpacity 
-        style={styles.quickDeleteButton}
-        onPress={(e) => {
-          e.stopPropagation();
-          deleteDrawingHandler(item);
+        style={[
+          styles.drawingItem,
+          isSelected && styles.selectedDrawingItem
+        ]}
+        onPress={() => {
+          if (isSelectionMode) {
+            toggleSelection(item.id);
+          } else {
+            openFullScreen(item);
+          }
         }}
+        onLongPress={() => handleLongPress(item.id)}
+        activeOpacity={0.8}
       >
-        <Text style={styles.quickDeleteText}>×</Text>
+        {/* Selection indicator */}
+        {isSelectionMode && (
+          <View style={[
+            styles.selectionIndicator,
+            isSelected && styles.selectedIndicator
+          ]}>
+            {isSelected && <Text style={styles.checkmark}>✓</Text>}
+          </View>
+        )}
+        
+        <Image 
+          source={{ uri: item.previewUri }} 
+          style={styles.drawingImage}
+          resizeMode="cover"
+        />
+        <View style={styles.drawingInfo}>
+          {/* Editable title */}
+          {isEditingThisTitle ? (
+            <View style={styles.titleEditContainer}>
+              <TextInput
+                style={styles.titleInput}
+                value={editingTitle}
+                onChangeText={setEditingTitle}
+                onSubmitEditing={saveTitle}
+                onBlur={saveTitle}
+                autoFocus
+                selectTextOnFocus
+                maxLength={50}
+              />
+              <TouchableOpacity onPress={cancelTitleEdit} style={styles.cancelEditButton}>
+                <Text style={styles.cancelEditText}>×</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity onPress={() => startEditingTitle(item)}>
+              <Text style={styles.drawingName} numberOfLines={1}>
+                {item.name}
+              </Text>
+            </TouchableOpacity>
+          )}
+          
+          <Text style={styles.drawingDate}>
+            {new Date(item.updatedAt ?? item.createdAt).toLocaleDateString()}
+          </Text>
+          
+          {/* Editability indicator */}
+          <View style={styles.editabilityIndicator}>
+            <Text style={[
+              styles.editabilityText, 
+              item.hasState ? styles.editableText : styles.viewOnlyText
+            ]}>
+              {item.hasState ? '✏️ Editable' : '👁️ View Only'}
+            </Text>
+          </View>
+        </View>
+        
+        {/* Quick delete button - only show when not in selection mode */}
+        {!isSelectionMode && (
+          <TouchableOpacity 
+            style={styles.quickDeleteButton}
+            onPress={(e) => {
+              e.stopPropagation();
+              deleteDrawingHandler(item);
+            }}
+          >
+            <Text style={styles.quickDeleteText}>×</Text>
+          </TouchableOpacity>
+        )}
       </TouchableOpacity>
-    </TouchableOpacity>
-  );
+    );
+  };
 
   // Empty state component
   const EmptyState = () => (
@@ -271,6 +479,11 @@ export default function GalleryScreen({ navigation }: any) {
             <Text style={styles.fullScreenDate}>
               Created: {new Date(selectedDrawing.createdAt).toLocaleString()}
             </Text>
+            {selectedDrawing.updatedAt && selectedDrawing.updatedAt !== selectedDrawing.createdAt && (
+              <Text style={styles.fullScreenDate}>
+                Updated: {new Date(selectedDrawing.updatedAt).toLocaleString()}
+              </Text>
+            )}
           </View>
         )}
       </View>
@@ -303,27 +516,65 @@ export default function GalleryScreen({ navigation }: any) {
       <StatusBar barStyle={settings.theme === 'dark' ? "light-content" : "dark-content"} backgroundColor={theme.background} />
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.headerBackground, borderBottomColor: theme.headerBorder }]}>
-        <TouchableOpacity 
-          style={[styles.headerBackButton, { backgroundColor: theme.secondary }]} 
-          onPress={() => navigation.goBack()}
-        >
-          <Text style={styles.backButtonText}>← Back</Text>
-        </TouchableOpacity>
-        
-        <Text style={[styles.headerTitle, { color: theme.primary }]}>
-          Gallery ({drawings.length})
-        </Text>
-        
-        {drawings.length > 0 && (
-          <TouchableOpacity 
-            style={styles.clearAllButton}
-            onPress={handleClearAll}
-          >
-            <Text style={styles.clearAllText}>Clear All</Text>
-          </TouchableOpacity>
+        {isSelectionMode ? (
+          // Selection mode header
+          <>
+            <TouchableOpacity 
+              style={[styles.headerBackButton, { backgroundColor: theme.secondary }]} 
+              onPress={toggleSelectionMode}
+            >
+              <Text style={styles.backButtonText}>Cancel</Text>
+            </TouchableOpacity>
+            
+            <Text style={[styles.headerTitle, { color: theme.primary }]}>
+              {selectedIds.length} Selected
+            </Text>
+            
+            <View style={styles.selectionActions}>
+              {selectedIds.length > 0 && (
+                <>
+                  <TouchableOpacity 
+                    style={styles.actionButton}
+                    onPress={shareSelectedDrawings}
+                  >
+                    <Text style={styles.actionButtonText}>Share</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.actionButton, styles.deleteActionButton]}
+                    onPress={deleteSelectedDrawings}
+                  >
+                    <Text style={styles.actionButtonText}>Delete</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </>
+        ) : (
+          // Normal mode header
+          <>
+            <TouchableOpacity 
+              style={[styles.headerBackButton, { backgroundColor: theme.secondary }]} 
+              onPress={() => navigation.goBack()}
+            >
+              <Text style={styles.backButtonText}>← Back</Text>
+            </TouchableOpacity>
+            
+            <Text style={[styles.headerTitle, { color: theme.primary }]}>
+              Gallery ({drawings.length})
+            </Text>
+            
+            {drawings.length > 0 ? (
+              <TouchableOpacity 
+                style={styles.clearAllButton}
+                onPress={handleClearAll}
+              >
+                <Text style={styles.clearAllText}>Clear All</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.placeholder} />
+            )}
+          </>
         )}
-        
-        {drawings.length === 0 && <View style={styles.placeholder} />}
       </View>
 
       {/* Drawings Grid or Empty State */}
@@ -344,6 +595,12 @@ export default function GalleryScreen({ navigation }: any) {
               tintColor="#2563eb"
             />
           }
+          onScrollBeginDrag={() => {
+            // Cancel title editing when scrolling
+            if (editingTitleId) {
+              cancelTitleEdit();
+            }
+          }}
         />
       )}
 
@@ -411,6 +668,26 @@ const styles = StyleSheet.create({
     width: 60,
   },
   
+  // Selection mode styles
+  selectionActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  actionButton: {
+    backgroundColor: "#2563eb",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  deleteActionButton: {
+    backgroundColor: "#dc2626",
+  },
+  actionButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  
   // Loading Styles
   loadingContainer: {
     flex: 1,
@@ -440,6 +717,33 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     position: "relative",
   },
+  selectedDrawingItem: {
+    borderWidth: 3,
+    borderColor: "#2563eb",
+  },
+  selectionIndicator: {
+    position: "absolute",
+    top: 8,
+    left: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
+    borderWidth: 2,
+    borderColor: "#6b7280",
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 1,
+  },
+  selectedIndicator: {
+    backgroundColor: "#2563eb",
+    borderColor: "#2563eb",
+  },
+  checkmark: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "bold",
+  },
   drawingImage: {
     width: "100%",
     height: ITEM_SIZE * 0.8,
@@ -457,6 +761,39 @@ const styles = StyleSheet.create({
   drawingDate: {
     fontSize: 12,
     color: "#6b7280",
+  },
+  
+  // Title editing styles
+  titleEditContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  titleInput: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#374151",
+    borderWidth: 1,
+    borderColor: "#2563eb",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "#fff",
+  },
+  cancelEditButton: {
+    marginLeft: 8,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "#dc2626",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  cancelEditText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "bold",
   },
   
   // 🆕 Editability Indicator Styles

@@ -12,11 +12,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
 
-import { DrawingState, DrawingElement, ToolType, Transform } from '../types/Drawing';
+import { DrawingState, DrawingElement, ToolType, Transform, generateDefaultTitle } from '../types/Drawing';
 import { saveDrawing } from '../utils/saveDrawing';
 import { loadDrawingState, generateId, createDefaultTransform } from '../utils/loadDrawing';
 import { SOLID_COLORS, DEFAULT_STROKE_COLOR } from '../constants/colors';
-import { getPoint, isPathClosed } from '../utils/gestureUtils';
+import { getPoint, isPathClosed, extractPathCoordinates } from '../utils/gestureUtils';
 import { useSettings } from '../contexts/SettingsContext';
 import Canvas, { CanvasRef } from '../components/Canvas';
 import Toolbar from '../components/ToolBar';
@@ -40,10 +40,16 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const drawingId = route?.params?.drawingId;
   const stateUri = route?.params?.stateUri;
 
+  // Persistent drawing ID for new drawings (created once, reused for all saves)
+  const [persistentDrawingId, setPersistentDrawingId] = useState<string | null>(null);
+
   // Canvas state
   const [elements, setElements] = useState<DrawingElement[]>([]);
   const [backgroundColor, setBackgroundColor] = useState(settings.defaultBackgroundColor);
   const [canvasTransform, setCanvasTransform] = useState<Transform>(createDefaultTransform());
+  
+  // Drawing title state
+  const [drawingTitle, setDrawingTitle] = useState<string>('');
   
   // Tool state - use settings for defaults
   const [selectedTool, setSelectedTool] = useState<ToolType>('brush');
@@ -58,6 +64,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     setSelectedElementId(null); // Clear selection when switching tools
   }, []);
 
+  // Brush stroke smoothing state
+  const [brushPoints, setBrushPoints] = useState<{ x: number; y: number }[]>([]);
+  const [lastBrushPoint, setLastBrushPoint] = useState<{ x: number; y: number } | null>(null);
+
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPath, setCurrentPath] = useState('');
@@ -69,6 +79,122 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const [lastEraserPosition, setLastEraserPosition] = useState<{ x: number; y: number } | null>(null);
   const [eraserAnimationScale, setEraserAnimationScale] = useState(1);
   const [currentEraserPath, setCurrentEraserPath] = useState<string | null>(null);
+
+  // Utility function to create smooth curves from points using Catmull-Rom splines
+  const createSmoothPath = useCallback((points: { x: number; y: number }[]): string => {
+    if (points.length < 2) return '';
+    if (points.length === 2) {
+      return `M${points[0].x},${points[0].y} L${points[1].x},${points[1].y}`;
+    }
+
+    let path = `M${points[0].x},${points[0].y}`;
+    
+    if (points.length === 3) {
+      // For 3 points, use a simple quadratic curve
+      const controlX = points[1].x;
+      const controlY = points[1].y;
+      path += ` Q${controlX},${controlY} ${points[2].x},${points[2].y}`;
+      return path;
+    }
+    
+    // For 4+ points, use smooth quadratic curves with better control points
+    for (let i = 1; i < points.length - 1; i++) {
+      const current = points[i];
+      const next = points[i + 1];
+      
+      // Calculate smooth control point
+      let controlX = current.x;
+      let controlY = current.y;
+      
+      // If we have previous and next points, smooth the control point
+      if (i > 0 && i < points.length - 2) {
+        const prev = points[i - 1];
+        const nextNext = points[i + 2];
+        
+        // Use weighted average for smoother curves
+        controlX = current.x + (next.x - prev.x) * 0.1;
+        controlY = current.y + (next.y - prev.y) * 0.1;
+      }
+      
+      // Calculate end point (midpoint to next for smooth connection)
+      const endX = (current.x + next.x) / 2;
+      const endY = (current.y + next.y) / 2;
+      
+      path += ` Q${controlX},${controlY} ${endX},${endY}`;
+    }
+    
+    // Add final point with smooth connection
+    const lastPoint = points[points.length - 1];
+    const secondLastPoint = points[points.length - 2];
+    const controlX = (secondLastPoint.x + lastPoint.x) / 2;
+    const controlY = (secondLastPoint.y + lastPoint.y) / 2;
+    path += ` Q${controlX},${controlY} ${lastPoint.x},${lastPoint.y}`;
+    
+    return path;
+  }, []);
+
+  // Smooth point addition with distance filtering
+  const addBrushPoint = useCallback((x: number, y: number) => {
+    const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+    
+    // Filter points that are too close together for smoother performance
+    if (lastBrushPoint) {
+      const distance = Math.sqrt(
+        Math.pow(canvasPoint.x - lastBrushPoint.x, 2) + 
+        Math.pow(canvasPoint.y - lastBrushPoint.y, 2)
+      );
+      
+      // Adaptive distance filtering based on brush size
+      const minDistance = Math.max(1, brushSize * 0.1);
+      if (distance < minDistance) {
+        return;
+      }
+    }
+    
+    // Add new point and update path
+    setBrushPoints(prev => {
+      const newPoints = [...prev, canvasPoint];
+      const smoothPath = createSmoothPath(newPoints);
+      setCurrentPath(smoothPath);
+      return newPoints;
+    });
+    
+    setLastBrushPoint(canvasPoint);
+  }, [canvasTransform, lastBrushPoint, brushSize, createSmoothPath]);
+
+  // Start brush stroke
+  const startBrushStroke = useCallback((x: number, y: number) => {
+    const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+    setBrushPoints([canvasPoint]);
+    setLastBrushPoint(canvasPoint);
+    setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
+  }, [canvasTransform]);
+
+  // End brush stroke
+  const endBrushStroke = useCallback(() => {
+    if (brushPoints.length >= 2) {
+      const finalPath = createSmoothPath(brushPoints);
+      
+      const newElement: DrawingElement = {
+        id: generateId(),
+        type: 'path',
+        data: { d: finalPath },
+        strokeColor,
+        fillColor: undefined,
+        strokeWidth: brushSize,
+        transform: createDefaultTransform(),
+        timestamp: Date.now(),
+      };
+      
+      setElements(prev => [...prev, newElement]);
+      addToHistory();
+    }
+    
+    // Reset brush state
+    setBrushPoints([]);
+    setLastBrushPoint(null);
+    setCurrentPath('');
+  }, [brushPoints, createSmoothPath, strokeColor, brushSize]);
   
   // Selection and movement state
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
@@ -100,6 +226,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const [lastTapTime, setLastTapTime] = useState(0);
   const [lastTapElementId, setLastTapElementId] = useState<string | null>(null);
   
+  // Long press handling for text editing
+  const [longPressTimer, setLongPressTimer] = useState<NodeJS.Timeout | null>(null);
+  const [isLongPressing, setIsLongPressing] = useState(false);
+  
   // Shape-specific state for selected shape
   const [selectedShapeWidth, setSelectedShapeWidth] = useState<number | null>(null);
   const [selectedShapeHeight, setSelectedShapeHeight] = useState<number | null>(null);
@@ -127,8 +257,12 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           if (state) {
             setElements(state.elements);
             setBackgroundColor(state.backgroundColor); // Keep existing drawing's background
+            setDrawingTitle(state.name); // Preserve existing title
             // Always reset zoom when loading a drawing
             setCanvasTransform({ scale: 1, translateX: 0, translateY: 0 });
+            
+            // Set persistent drawing ID for edit mode
+            setPersistentDrawingId(drawingId || state.id);
             
             // Initialize history
             setHistory([state]);
@@ -144,10 +278,18 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         setBrushSize(settings.defaultBrushSize);
         setEraserSize(settings.defaultEraserSize);
         
+        // Create persistent drawing ID for new drawing (only once)
+        const newDrawingId = generateId();
+        setPersistentDrawingId(newDrawingId);
+        
+        // Generate default title for new drawing
+        const defaultTitle = generateDefaultTitle();
+        setDrawingTitle(defaultTitle);
+        
         // Initialize empty history for new drawing
         const initialState: DrawingState = {
-          id: generateId(),
-          name: `Drawing ${new Date().toLocaleDateString()}`,
+          id: newDrawingId,
+          name: defaultTitle,
           elements: [],
           backgroundColor: settings.defaultBackgroundColor,
           canvasTransform: createDefaultTransform(),
@@ -163,13 +305,13 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     };
 
     initializeCanvas();
-  }, [editMode, stateUri, settings.defaultBackgroundColor, settings.defaultBrushSize, settings.defaultEraserSize]);
+  }, [editMode, stateUri, drawingId, settings.defaultBackgroundColor, settings.defaultBrushSize, settings.defaultEraserSize]);
 
   // Add to history
   const addToHistory = useCallback(() => {
     const newState: DrawingState = {
       id: drawingId || generateId(),
-      name: `Drawing ${new Date().toLocaleDateString()}`,
+      name: drawingTitle || generateDefaultTitle(),
       elements,
       backgroundColor,
       canvasTransform: { scale: 1, translateX: 0, translateY: 0 }, // Don't save zoom in history
@@ -250,7 +392,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         const textData = data;
         const textWidth = textData.text.length * textData.fontSize * 0.6;
         const textHeight = textData.fontSize * 1.2;
-        const textTolerance = eraserSize / 2;
+        const textTolerance = 10; // Fixed tolerance for text selection
         return localX >= textData.x - textTolerance && 
                localX <= textData.x + textWidth + textTolerance &&
                localY >= textData.y - textHeight - textTolerance && 
@@ -279,22 +421,6 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         return false;
     }
     return false;
-  };
-
-  // Extract coordinates from SVG path string
-  const extractPathCoordinates = (pathString: string): { x: number; y: number }[] => {
-    const coords: { x: number; y: number }[] = [];
-    const numbers = pathString.match(/[-+]?[0-9]*\.?[0-9]+/g);
-    if (!numbers) return coords;
-    
-    for (let i = 0; i < numbers.length - 1; i += 2) {
-      const x = parseFloat(numbers[i]);
-      const y = parseFloat(numbers[i + 1]);
-      if (!isNaN(x) && !isNaN(y)) {
-        coords.push({ x, y });
-      }
-    }
-    return coords;
   };
 
   // Distance from point to line segment
@@ -330,15 +456,114 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     return Math.sqrt(dx * dx + dy * dy);
   };
 
-  // Handle eraser - Two different modes: instant delete for shapes, partial erase for freehand
+  // Utility function to check if a point is within eraser radius of a path segment
+  const isPointNearPathSegment = (px: number, py: number, x1: number, y1: number, x2: number, y2: number, radius: number): boolean => {
+    const A = px - x1;
+    const B = py - y1;
+    const C = x2 - x1;
+    const D = y2 - y1;
+
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    
+    if (lenSq === 0) {
+      return Math.sqrt(A * A + B * B) <= radius;
+    }
+
+    let param = dot / lenSq;
+    param = Math.max(0, Math.min(1, param));
+    
+    const xx = x1 + param * C;
+    const yy = y1 + param * D;
+    
+    const dx = px - xx;
+    const dy = py - yy;
+    return Math.sqrt(dx * dx + dy * dy) <= radius;
+  };
+
+  // Split a path at intersection points with eraser
+  const splitPathAtEraserIntersections = (pathElement: DrawingElement, eraserPoints: { x: number; y: number }[], eraserRadius: number): DrawingElement[] => {
+    if (pathElement.type !== 'path' || !pathElement.data.d) {
+      return [pathElement];
+    }
+
+    const pathCoords = extractPathCoordinates(pathElement.data.d);
+    if (pathCoords.length < 2) {
+      return [pathElement];
+    }
+
+    // Find segments that should be kept (not intersecting with eraser)
+    const keepSegments: { start: number; end: number }[] = [];
+    let currentSegmentStart = 0;
+
+    for (let i = 0; i < pathCoords.length - 1; i++) {
+      const coord1 = pathCoords[i];
+      const coord2 = pathCoords[i + 1];
+      
+      // Check if this segment intersects with any eraser point
+      let intersects = false;
+      for (const eraserPoint of eraserPoints) {
+        if (isPointNearPathSegment(eraserPoint.x, eraserPoint.y, coord1.x, coord1.y, coord2.x, coord2.y, eraserRadius)) {
+          intersects = true;
+          break;
+        }
+      }
+
+      if (intersects) {
+        // End current segment if it has content
+        if (i > currentSegmentStart) {
+          keepSegments.push({ start: currentSegmentStart, end: i });
+        }
+        currentSegmentStart = i + 1;
+      }
+    }
+
+    // Add final segment if it exists
+    if (currentSegmentStart < pathCoords.length - 1) {
+      keepSegments.push({ start: currentSegmentStart, end: pathCoords.length - 1 });
+    }
+
+    // Create new path elements from kept segments
+    const resultPaths: DrawingElement[] = [];
+    
+    for (const segment of keepSegments) {
+      if (segment.end > segment.start) {
+        const segmentCoords = pathCoords.slice(segment.start, segment.end + 1);
+        if (segmentCoords.length >= 2) {
+          let pathString = `M${segmentCoords[0].x},${segmentCoords[0].y}`;
+          for (let i = 1; i < segmentCoords.length; i++) {
+            pathString += ` L${segmentCoords[i].x},${segmentCoords[i].y}`;
+          }
+          
+          const newPathElement: DrawingElement = {
+            ...pathElement,
+            id: generateId(),
+            data: { d: pathString },
+            timestamp: Date.now(),
+          };
+          
+          resultPaths.push(newPathElement);
+        }
+      }
+    }
+
+    return resultPaths;
+  };
+
+  // Handle eraser - Professional implementation
   const handleEraser = useCallback((x: number, y: number, pressure: number = 1) => {
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
     
+    // Apply pressure-based size adjustment
+    const pressureMultiplier = Math.max(0.5, Math.min(2, pressure));
+    const adjustedEraserSize = eraserSize * pressureMultiplier;
+    
     // Update eraser pressure for visual feedback
     setEraserPressure(pressure);
     
     let hasChanges = false;
     const elementsToRemove: string[] = [];
+    const elementsToAdd: DrawingElement[] = [];
 
     // Check for shapes and text - instant delete on hit (keep existing behavior)
     elements.forEach(element => {
@@ -351,30 +576,95 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       }
     });
 
-    // Remove shapes and text that were hit
-    if (elementsToRemove.length > 0) {
-      setElements(prev => prev.filter(element => !elementsToRemove.includes(element.id)));
+    // Handle freehand paths - partial erasing
+    elements.forEach(element => {
+      if (element.type === 'path' && !element.isEraser) {
+        const pathCoords = extractPathCoordinates(element.data.d);
+        let pathIntersects = false;
+        
+        // Check if eraser intersects with this path
+        for (let i = 0; i < pathCoords.length - 1; i++) {
+          const coord1 = pathCoords[i];
+          const coord2 = pathCoords[i + 1];
+          
+          if (isPointNearPathSegment(canvasPoint.x, canvasPoint.y, coord1.x, coord1.y, coord2.x, coord2.y, adjustedEraserSize / 2)) {
+            pathIntersects = true;
+            break;
+          }
+        }
+
+        if (pathIntersects) {
+          // Split the path and keep non-intersecting segments
+          const splitPaths = splitPathAtEraserIntersections(element, [canvasPoint], adjustedEraserSize / 2);
+          
+          // Remove original path
+          elementsToRemove.push(element.id);
+          
+          // Add split paths (if any remain)
+          elementsToAdd.push(...splitPaths);
+          hasChanges = true;
+        }
+      }
+    });
+
+    // Apply changes
+    if (hasChanges) {
+      setElements(prev => {
+        // Remove elements marked for removal
+        let newElements = prev.filter(element => !elementsToRemove.includes(element.id));
+        
+        // Add new split path elements
+        newElements = [...newElements, ...elementsToAdd];
+        
+        return newElements;
+      });
       setSelectedElementId(null);
-      hasChanges = true;
     }
 
-    // Store current position for next interpolation
+    // Store current position for continuous erasing
     setLastEraserPosition({ x, y });
     
     return hasChanges;
-  }, [elements, canvasTransform, lastEraserPosition]);
+  }, [elements, canvasTransform, eraserSize, lastEraserPosition]);
 
-  // Continue eraser stroke for freehand erasing
+  // Continue eraser stroke for continuous erasing
   const continueEraserStroke = useCallback((x: number, y: number, pressure: number = 1) => {
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
     
+    // Apply pressure-based size adjustment
+    const pressureMultiplier = Math.max(0.5, Math.min(2, pressure));
+    const adjustedEraserSize = eraserSize * pressureMultiplier;
+    
     // Update eraser pressure for visual feedback
     setEraserPressure(pressure);
     
     let hasChanges = false;
     const elementsToRemove: string[] = [];
+    const elementsToAdd: DrawingElement[] = [];
+
+    // Create eraser path from last position to current position for smooth erasing
+    const eraserPoints: { x: number; y: number }[] = [canvasPoint];
     
-    // Check for shapes and text - instant delete on hit (keep existing behavior)
+    if (lastEraserPosition) {
+      const lastCanvasPoint = applyInverseTransform(lastEraserPosition.x, lastEraserPosition.y, canvasTransform);
+      
+      // Interpolate points between last and current position for smooth erasing
+      const distance = Math.sqrt(
+        Math.pow(canvasPoint.x - lastCanvasPoint.x, 2) + 
+        Math.pow(canvasPoint.y - lastCanvasPoint.y, 2)
+      );
+      
+      // Limit interpolation steps for performance (max 10 steps)
+      const steps = Math.max(1, Math.min(10, Math.floor(distance / (adjustedEraserSize / 4))));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const interpX = lastCanvasPoint.x + (canvasPoint.x - lastCanvasPoint.x) * t;
+        const interpY = lastCanvasPoint.y + (canvasPoint.y - lastCanvasPoint.y) * t;
+        eraserPoints.push({ x: interpX, y: interpY });
+      }
+    }
+
+    // Check for shapes and text - instant delete on hit
     elements.forEach(element => {
       if ((element.type === 'shape' || element.type === 'text') && 
           isPointInElement(canvasPoint.x, canvasPoint.y, element)) {
@@ -385,19 +675,61 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       }
     });
 
-    // Remove shapes and text that were hit
-    if (elementsToRemove.length > 0) {
-      setElements(prev => prev.filter(element => !elementsToRemove.includes(element.id)));
+    // Handle freehand paths - partial erasing with interpolated points
+    elements.forEach(element => {
+      if (element.type === 'path' && !element.isEraser) {
+        const pathCoords = extractPathCoordinates(element.data.d);
+        let pathIntersects = false;
+        
+        // Check if eraser path intersects with this path
+        for (const eraserPoint of eraserPoints) {
+          for (let i = 0; i < pathCoords.length - 1; i++) {
+            const coord1 = pathCoords[i];
+            const coord2 = pathCoords[i + 1];
+            
+            if (isPointNearPathSegment(eraserPoint.x, eraserPoint.y, coord1.x, coord1.y, coord2.x, coord2.y, adjustedEraserSize / 2)) {
+              pathIntersects = true;
+              break;
+            }
+          }
+          if (pathIntersects) break;
+        }
+
+        if (pathIntersects) {
+          // Split the path and keep non-intersecting segments
+          const splitPaths = splitPathAtEraserIntersections(element, eraserPoints, adjustedEraserSize / 2);
+          
+          // Remove original path
+          elementsToRemove.push(element.id);
+          
+          // Add split paths (if any remain)
+          elementsToAdd.push(...splitPaths);
+          hasChanges = true;
+        }
+      }
+    });
+
+    // Apply changes
+    if (hasChanges) {
+      setElements(prev => {
+        // Remove elements marked for removal
+        let newElements = prev.filter(element => !elementsToRemove.includes(element.id));
+        
+        // Add new split path elements
+        newElements = [...newElements, ...elementsToAdd];
+        
+        return newElements;
+      });
       setSelectedElementId(null);
     }
     
     setLastEraserPosition({ x, y });
     return hasChanges;
-  }, [canvasTransform, elements]);
+  }, [canvasTransform, elements, eraserSize, lastEraserPosition]);
 
   // End eraser stroke
   const endEraserStroke = useCallback(() => {
-    // Reset eraser state
+    // Reset eraser state - no cleanup needed for path segmentation approach
     setCurrentEraserPath(null);
     setLastEraserPosition(null);
     // History is handled by the batching timeout
@@ -553,6 +885,33 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     }
   }, [selectedElementId, elements]);
 
+  // Start long press timer for text editing
+  const startLongPressTimer = useCallback((elementId: string) => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+    }
+    
+    const timer = setTimeout(() => {
+      const element = elements.find(el => el.id === elementId);
+      if (element && element.type === 'text') {
+        setIsLongPressing(true);
+        setSelectedElementId(elementId);
+        handleTextEdit();
+      }
+    }, 600); // 600ms long press
+    
+    setLongPressTimer(timer);
+  }, [longPressTimer, elements, handleTextEdit]);
+
+  // Cancel long press timer
+  const cancelLongPressTimer = useCallback(() => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      setLongPressTimer(null);
+    }
+    setIsLongPressing(false);
+  }, [longPressTimer]);
+
   // Auto-save functionality
   useEffect(() => {
     if (!settings.autoSave || elements.length === 0) return;
@@ -569,34 +928,38 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
 
         if (!imageUri) return;
 
-        // Determine if this is edit mode or new drawing
-        const isEditMode = editMode && drawingId;
-        const finalDrawingId = isEditMode ? drawingId : generateId();
+        // Use persistent drawing ID for consistency
+        const finalDrawingId = editMode && drawingId ? drawingId : persistentDrawingId;
+        
+        if (!finalDrawingId) {
+          console.warn('No drawing ID available for auto-save');
+          return;
+        }
         
         // Create drawing state
         const state: DrawingState = {
           id: finalDrawingId,
-          name: isEditMode ? `Drawing ${finalDrawingId}` : `Drawing ${new Date().toLocaleDateString()}`,
+          name: drawingTitle || generateDefaultTitle(),
           elements,
           backgroundColor,
           canvasTransform: { scale: 1, translateX: 0, translateY: 0 },
           canvasWidth: SCREEN_WIDTH,
           canvasHeight: SCREEN_HEIGHT - 135,
           version: '1.0.0',
-          createdAt: isEditMode && history[0] ? history[0].createdAt : Date.now(),
+          createdAt: editMode && history[0] ? history[0].createdAt : Date.now(),
           updatedAt: Date.now(),
         };
 
-        // Auto-save the drawing
+        // Auto-save the drawing (will update existing or create new)
         await saveDrawing(finalDrawingId, state.name, imageUri, state);
-        console.log('Auto-saved drawing');
+        console.log('Auto-saved drawing with ID:', finalDrawingId);
       } catch (error) {
         console.error('Auto-save failed:', error);
       }
     }, 2000); // Auto-save 2 seconds after last change
 
     return () => clearTimeout(autoSaveTimeout);
-  }, [elements, backgroundColor, settings.autoSave, editMode, drawingId, history]);
+  }, [elements, backgroundColor, settings.autoSave, editMode, drawingId, persistentDrawingId, history]);
 
   // Cleanup eraser timeout on unmount
   useEffect(() => {
@@ -604,8 +967,11 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       if (eraserBatchTimeout) {
         clearTimeout(eraserBatchTimeout);
       }
+      if (longPressTimer) {
+        clearTimeout(longPressTimer);
+      }
     };
-  }, [eraserBatchTimeout]);
+  }, [eraserBatchTimeout, longPressTimer]);
 
   // Update selected text properties when selection changes
   useEffect(() => {
@@ -723,17 +1089,27 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         y: canvasPoint.y - elementPos.y,
       });
       setDragStartPosition(elementPos);
+      
+      // Start long press timer for text elements
+      if (element.type === 'text') {
+        startLongPressTimer(element.id);
+      }
+      
       return true;
     } else {
       // Deselect if tapping on empty space
       setSelectedElementId(null);
+      cancelLongPressTimer();
       return false;
     }
-  }, [elements, canvasTransform, selectedTool, isDrawing, selectedElementId, canvasTransform]);
+  }, [elements, canvasTransform, selectedTool, isDrawing, selectedElementId, canvasTransform, startLongPressTimer, cancelLongPressTimer]);
 
   // Handle element dragging
   const handleElementDrag = useCallback((x: number, y: number) => {
     if (!selectedElementId) return;
+    
+    // Cancel long press when dragging starts
+    cancelLongPressTimer();
     
     if (isResizing) {
       handleShapeResize(x, y);
@@ -744,10 +1120,13 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       
       updateElementPosition(selectedElementId, newX, newY);
     }
-  }, [selectedElementId, isDragging, isResizing, dragOffset, canvasTransform, handleShapeResize]);
+  }, [selectedElementId, isDragging, isResizing, dragOffset, canvasTransform, handleShapeResize, cancelLongPressTimer]);
 
   // Handle drag end
   const handleDragEnd = useCallback(() => {
+    // Cancel any ongoing long press
+    cancelLongPressTimer();
+    
     if (isResizing) {
       endResize();
     } else if (isDragging && selectedElementId && dragStartPosition) {
@@ -766,7 +1145,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       setIsDragging(false);
       setDragStartPosition(null);
     }
-  }, [isDragging, isResizing, selectedElementId, dragStartPosition, elements, addToHistory, endResize]);
+  }, [isDragging, isResizing, selectedElementId, dragStartPosition, elements, addToHistory, endResize, cancelLongPressTimer]);
 
   // Handle fill tool - only fill when explicitly using fill tool
   const handleFill = useCallback((x: number, y: number) => {
@@ -915,7 +1294,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           return;
         }
         setIsDrawing(true);
-        setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
+        startBrushStroke(x, y);
         break;
 
       case 'eraser':
@@ -927,10 +1306,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         // Extract pressure from touch event (if available)
         const pressure = evt.nativeEvent.force || 1;
         
-        // Start eraser stroke using currentPath system
-        setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
-        
-        // Also handle instant deletion of shapes/text
+        // Handle erasing using path segmentation
         const erased = handleEraser(x, y, pressure);
         
         if (erased) {
@@ -966,6 +1342,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           if (selectedElement && selectedElement.type === 'text') {
             const currentTime = Date.now();
             if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
+              cancelLongPressTimer(); // Cancel long press if double click
               handleTextEdit();
               return;
             } else {
@@ -985,6 +1362,21 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
 
       default:
         if (handleElementSelection(x, y)) {
+          const selectedElement = elements.find(el => el.id === selectedElementId);
+          if (selectedElement && selectedElement.type === 'text') {
+            // Check for double-click to edit text (works with any tool)
+            const currentTime = Date.now();
+            if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
+              // Double click detected - edit text
+              cancelLongPressTimer(); // Cancel long press if double click
+              handleTextEdit();
+              return;
+            } else {
+              // Single click - prepare for dragging
+              setLastTapTime(currentTime);
+              setLastTapElementId(selectedElement.id);
+            }
+          }
           setIsDragging(true);
         }
         break;
@@ -1003,7 +1395,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     } else if (isDrawing) {
       switch (selectedTool) {
         case 'brush':
-          setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
+          addBrushPoint(x, y);
           break;
         
         case 'line':
@@ -1076,13 +1468,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     } else if (isErasing) {
       setEraserPosition({ x, y });
       
-      // Continue the eraser path
-      setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
-      
       // Extract pressure from touch event (if available)
       const pressure = evt.nativeEvent.force || 1;
       
-      // Continue erasing shapes/text
+      // Continue erasing using path segmentation
       const erased = continueEraserStroke(x, y, pressure);
       if (erased) {
         // Batch history updates during continuous erasing
@@ -1117,27 +1506,8 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       setEraserAnimationScale(1); // Reset scale
       setEraserPressure(1); // Reset pressure
       
-      // Create eraser stroke from current path
-      if (currentPath && currentPath.length >= 4) {
-        const eraserStroke: DrawingElement = {
-          id: generateId(),
-          type: 'path',
-          data: { d: currentPath },
-          strokeColor: '#000000', // Color doesn't matter for eraser strokes
-          fillColor: undefined,
-          strokeWidth: eraserSize,
-          transform: createDefaultTransform(),
-          timestamp: Date.now(),
-          isEraser: true, // Mark as eraser stroke
-        };
-        setElements(prev => [...prev, eraserStroke]);
-      }
-      
-      // End eraser stroke
+      // End eraser stroke (no path creation needed)
       endEraserStroke();
-      
-      // Clear current path
-      setCurrentPath('');
       
       // Ensure final history update for eraser session
       if (eraserBatchTimeout) {
@@ -1151,20 +1521,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     if (isDrawing) {
       switch (selectedTool) {
         case 'brush':
-          if (currentPath && currentPath.length >= 4) {
-            const newElement: DrawingElement = {
-              id: generateId(),
-              type: 'path',
-              data: { d: currentPath },
-              strokeColor,
-              fillColor: undefined, // Paths don't have fill
-              strokeWidth: brushSize,
-              transform: createDefaultTransform(),
-              timestamp: Date.now(),
-            };
-            setElements(prev => [...prev, newElement]);
-            addToHistory();
-          }
+          endBrushStroke();
           break;
 
         case 'line':
@@ -1194,6 +1551,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       setCurrentPath('');
       setStartPoint(null);
       setCurrentShape(null);
+      
+      // Reset brush state
+      setBrushPoints([]);
+      setLastBrushPoint(null);
     }
   }, [canvasTransform, isDragging, isErasing, isDrawing, currentPath, startPoint, selectedTool, strokeColor, brushSize, eraserBatchTimeout, handleDragEnd, addToHistory, currentShape]);
 
@@ -1273,9 +1634,9 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
             setIsDragging(true);
             return;
           }
-          // Otherwise start drawing
+          // Otherwise start smooth brush stroke
           setIsDrawing(true);
-          setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
+          startBrushStroke(x, y);
           break;
 
         case 'eraser':
@@ -1287,10 +1648,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           // Extract pressure from touch event (if available)
           const pressure = evt.nativeEvent.force || 1;
           
-          // Start eraser stroke using currentPath system
-          setCurrentPath(`M${canvasPoint.x},${canvasPoint.y}`);
-          
-          // Also handle instant deletion of shapes/text
+          // Handle erasing using path segmentation (no currentPath needed)
           const erased = handleEraser(x, y, pressure);
           
           if (erased) {
@@ -1331,6 +1689,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
               const currentTime = Date.now();
               if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
                 // Double tap detected - edit text
+                cancelLongPressTimer(); // Cancel long press if double tap
                 handleTextEdit();
                 return;
               } else {
@@ -1353,6 +1712,21 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         default:
           // For any other tool or no tool, try to select an element
           if (handleElementSelection(x, y)) {
+            const selectedElement = elements.find(el => el.id === selectedElementId);
+            if (selectedElement && selectedElement.type === 'text') {
+              // Check for double-tap to edit text (works with any tool)
+              const currentTime = Date.now();
+              if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
+                // Double tap detected - edit text
+                cancelLongPressTimer(); // Cancel long press if double tap
+                handleTextEdit();
+                return;
+              } else {
+                // Single tap - prepare for dragging
+                setLastTapTime(currentTime);
+                setLastTapElementId(selectedElement.id);
+              }
+            }
             setIsDragging(true);
           }
           break;
@@ -1417,7 +1791,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         } else if (isDrawing) {
           switch (selectedTool) {
             case 'brush':
-              setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
+              addBrushPoint(x, y);
               break;
             
             case 'line':
@@ -1491,13 +1865,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           // Continue erasing while dragging
           setEraserPosition({ x, y });
           
-          // Continue the eraser path
-          setCurrentPath(prev => `${prev} L${canvasPoint.x},${canvasPoint.y}`);
-          
           // Extract pressure from touch event (if available)
           const pressure = evt.nativeEvent.force || 1;
           
-          // Continue erasing shapes/text
+          // Continue erasing using path segmentation
           const erased = continueEraserStroke(x, y, pressure);
           if (erased) {
             // Batch history updates during continuous erasing
@@ -1542,27 +1913,8 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         setEraserAnimationScale(1); // Reset scale
         setEraserPressure(1); // Reset pressure
         
-        // Create eraser stroke from current path
-        if (currentPath && currentPath.length >= 4) {
-          const eraserStroke: DrawingElement = {
-            id: generateId(),
-            type: 'path',
-            data: { d: currentPath },
-            strokeColor: '#000000', // Color doesn't matter for eraser strokes
-            fillColor: undefined,
-            strokeWidth: eraserSize,
-            transform: createDefaultTransform(),
-            timestamp: Date.now(),
-            isEraser: true, // Mark as eraser stroke
-          };
-          setElements(prev => [...prev, eraserStroke]);
-        }
-        
-        // End eraser stroke
+        // End eraser stroke (no path creation needed for segmentation approach)
         endEraserStroke();
-        
-        // Clear current path
-        setCurrentPath('');
         
         // Ensure final history update for eraser session
         if (eraserBatchTimeout) {
@@ -1576,19 +1928,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       if (isDrawing) {
         switch (selectedTool) {
           case 'brush':
-            if (currentPath && currentPath.length >= 4) {
-              const newElement: DrawingElement = {
-                id: generateId(),
-                type: 'path',
-                data: { d: currentPath },
-                strokeColor,
-                strokeWidth: brushSize,
-                transform: createDefaultTransform(),
-                timestamp: Date.now(),
-              };
-              setElements(prev => [...prev, newElement]);
-              addToHistory();
-            }
+            endBrushStroke();
             break;
 
           case 'line':
@@ -1629,6 +1969,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         setCurrentPath('');
         setStartPoint(null);
         setCurrentShape(null);
+        
+        // Reset brush state
+        setBrushPoints([]);
+        setLastBrushPoint(null);
       }
     },
   });
@@ -1682,16 +2026,20 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         throw new Error('Image export failed - no image URI returned');
       }
 
-      // Determine if this is edit mode or new drawing
+      // Use persistent drawing ID for consistency
       const isEditMode = editMode && drawingId;
-      const finalDrawingId = isEditMode ? drawingId : generateId();
+      const finalDrawingId = isEditMode ? drawingId : persistentDrawingId;
+      
+      if (!finalDrawingId) {
+        throw new Error('No drawing ID available for save');
+      }
       
       console.log(`Save operation: ${isEditMode ? 'EDIT' : 'NEW'} mode, ID: ${finalDrawingId}`);
       
       // Create drawing state
       const state: DrawingState = {
         id: finalDrawingId,
-        name: isEditMode ? `Drawing ${finalDrawingId}` : `Drawing ${new Date().toLocaleDateString()}`,
+        name: drawingTitle || generateDefaultTitle(),
         elements,
         backgroundColor,
         canvasTransform: { scale: 1, translateX: 0, translateY: 0 }, // Always save with default transform
@@ -1721,7 +2069,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       Alert.alert('Error', `Failed to save drawing: ${errorMessage}. Please try again.`);
     }
-  }, [elements, backgroundColor, canvasTransform, editMode, drawingId, navigation, history]);
+  }, [elements, backgroundColor, canvasTransform, editMode, drawingId, persistentDrawingId, navigation, history]);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: theme.background }]}>
@@ -1784,7 +2132,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
               currentPath={currentPath}
               currentPathColor={strokeColor}
               currentPathWidth={brushSize}
-              currentPathIsEraser={selectedTool === 'eraser' && isErasing}
+              currentPathIsEraser={false} // No eraser paths in segmentation approach
               currentShape={currentShape}
               selectedElementId={selectedElementId}
               isDragging={isDragging}
