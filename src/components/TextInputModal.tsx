@@ -65,8 +65,9 @@ const TextInputModal: React.FC<TextInputModalProps> = ({
             onChangeText={setText}
             placeholder="Type your text here..."
             multiline
-            autoFocus
+            autoFocus={true}
             maxLength={500}
+            selectTextOnFocus={true}
           />
           
           <View style={styles.buttons}>

@@ -8,6 +8,8 @@ import {
   StatusBar,
   GestureResponderEvent,
   Platform,
+  TouchableOpacity,
+  Text,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
@@ -58,11 +60,17 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const [eraserSize, setEraserSize] = useState(settings.defaultEraserSize);
   const [textSize, setTextSize] = useState(16);
 
+  // Hide text action menu
+  const hideTextActionMenu = useCallback(() => {
+    setShowTextActionMenu(false);
+  }, []);
+
   // Clear selection when switching tools
   const handleToolChange = useCallback((tool: ToolType) => {
     setSelectedTool(tool);
     setSelectedElementId(null); // Clear selection when switching tools
-  }, []);
+    hideTextActionMenu(); // Hide text action menu when switching tools
+  }, [hideTextActionMenu]);
 
   // Brush stroke smoothing state
   const [brushPoints, setBrushPoints] = useState<{ x: number; y: number }[]>([]);
@@ -218,6 +226,10 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const [showTextModal, setShowTextModal] = useState(false);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [textInputPosition, setTextInputPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  
+  // Text action menu state
+  const [showTextActionMenu, setShowTextActionMenu] = useState(false);
+  const [textActionMenuPosition, setTextActionMenuPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   
   // Text-specific state for selected text
   const [selectedTextColor, setSelectedTextColor] = useState<string | null>(null);
@@ -912,6 +924,47 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     setIsLongPressing(false);
   }, [longPressTimer]);
 
+  // Show text action menu
+  const showTextActionMenuAt = useCallback((x: number, y: number) => {
+    setTextActionMenuPosition({ x, y });
+    setShowTextActionMenu(true);
+  }, []);
+
+  // Handle text action menu - Edit
+  const handleTextActionEdit = useCallback(() => {
+    hideTextActionMenu();
+    handleTextEdit();
+  }, [hideTextActionMenu]);
+
+  // Handle text action menu - Add New
+  const handleTextActionAdd = useCallback(() => {
+    hideTextActionMenu();
+    setSelectedElementId(null); // Deselect current text
+    // Open text modal for new text at center of screen
+    const centerX = SCREEN_WIDTH / 2;
+    const centerY = (SCREEN_HEIGHT - 135) / 2; // Account for toolbar height
+    const canvasPoint = applyInverseTransform(centerX, centerY, canvasTransform);
+    setTextInputPosition(canvasPoint);
+    setEditingTextId(null);
+    setShowTextModal(true);
+  }, [hideTextActionMenu, canvasTransform]);
+
+  // Handle text action menu - Delete
+  const handleTextActionDelete = useCallback(() => {
+    if (selectedElementId) {
+      setElements(prev => prev.filter(element => element.id !== selectedElementId));
+      addToHistory();
+      setSelectedElementId(null);
+    }
+    hideTextActionMenu();
+  }, [selectedElementId, addToHistory, hideTextActionMenu]);
+
+  // Handle text action menu - Exit
+  const handleTextActionExit = useCallback(() => {
+    setSelectedElementId(null);
+    hideTextActionMenu();
+  }, [hideTextActionMenu]);
+
   // Auto-save functionality
   useEffect(() => {
     if (!settings.autoSave || elements.length === 0) return;
@@ -1015,6 +1068,36 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     setShowTextModal(true);
   }, [canvasTransform]);
 
+  // Find text element at point using screen coordinates
+  const findTextElementAtPoint = (x: number, y: number): DrawingElement | null => {
+    const screenPoint = { x, y };
+    
+    // Check for text elements using screen coordinates (reverse order for topmost first)
+    for (let i = elements.length - 1; i >= 0; i--) {
+      const element = elements[i];
+      if (element.type === 'text') {
+        const textData = element.data;
+        // Calculate text position in screen coordinates (same as Canvas positioning)
+        const textScreenX = (textData.x + element.transform.translateX) * canvasTransform.scale + canvasTransform.translateX;
+        const textScreenY = (textData.y + element.transform.translateY) * canvasTransform.scale + canvasTransform.translateY;
+        
+        // Calculate text bounds
+        const textWidth = textData.text.length * textData.fontSize * 0.6 * canvasTransform.scale;
+        const textHeight = textData.fontSize * 1.2 * canvasTransform.scale;
+        const textTolerance = 10;
+        
+        // Check if point is within text bounds
+        if (screenPoint.x >= textScreenX - textTolerance && 
+            screenPoint.x <= textScreenX + textWidth + textTolerance &&
+            screenPoint.y >= textScreenY - textHeight - textTolerance && 
+            screenPoint.y <= textScreenY + textTolerance) {
+          return element;
+        }
+      }
+    }
+    return null;
+  };
+
   // Find element at point for selection
   const findElementAtPoint = (x: number, y: number): DrawingElement | null => {
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
@@ -1058,12 +1141,11 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
   const handleElementSelection = useCallback((x: number, y: number) => {
     if (!canDragInCurrentTool()) return false;
     
-    const canvasPoint = applyInverseTransform(x, y, canvasTransform);
-    
     // First check if clicking on resize handle of selected element
     if (selectedElementId) {
       const selectedElement = elements.find(el => el.id === selectedElementId);
       if (selectedElement && selectedElement.type === 'shape') {
+        const canvasPoint = applyInverseTransform(x, y, canvasTransform);
         const handle = getResizeHandleAt(canvasPoint.x, canvasPoint.y, selectedElement);
         if (handle) {
           setIsResizing(true);
@@ -1079,11 +1161,37 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       }
     }
     
-    // Then check for element selection
-    const element = findElementAtPoint(x, y);
-    if (element) {
-      setSelectedElementId(element.id);
-      const elementPos = getElementPosition(element);
+    // If text tool is active, don't handle text selection here - let text tool handle it
+    if (selectedTool === 'text') {
+      // Only handle non-text elements when text tool is active
+      const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+      for (let i = elements.length - 1; i >= 0; i--) {
+        const element = elements[i];
+        if (element.type !== 'text' && isPointInElement(canvasPoint.x, canvasPoint.y, element)) {
+          setSelectedElementId(element.id);
+          const elementPos = getElementPosition(element);
+          setDragOffset({
+            x: canvasPoint.x - elementPos.x,
+            y: canvasPoint.y - elementPos.y,
+          });
+          setDragStartPosition(elementPos);
+          
+          return true;
+        }
+      }
+      
+      // Deselect if tapping on empty space
+      setSelectedElementId(null);
+      cancelLongPressTimer();
+      return false;
+    }
+    
+    // For other tools, check for text elements using the helper function
+    const foundTextElement = findTextElementAtPoint(x, y);
+    if (foundTextElement) {
+      setSelectedElementId(foundTextElement.id);
+      const elementPos = getElementPosition(foundTextElement);
+      const canvasPoint = applyInverseTransform(x, y, canvasTransform);
       setDragOffset({
         x: canvasPoint.x - elementPos.x,
         y: canvasPoint.y - elementPos.y,
@@ -1091,18 +1199,33 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       setDragStartPosition(elementPos);
       
       // Start long press timer for text elements
-      if (element.type === 'text') {
-        startLongPressTimer(element.id);
-      }
+      startLongPressTimer(foundTextElement.id);
       
       return true;
-    } else {
-      // Deselect if tapping on empty space
-      setSelectedElementId(null);
-      cancelLongPressTimer();
-      return false;
     }
-  }, [elements, canvasTransform, selectedTool, isDrawing, selectedElementId, canvasTransform, startLongPressTimer, cancelLongPressTimer]);
+    
+    // Check for other elements using canvas coordinates
+    const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+    for (let i = elements.length - 1; i >= 0; i--) {
+      const element = elements[i];
+      if (element.type !== 'text' && isPointInElement(canvasPoint.x, canvasPoint.y, element)) {
+        setSelectedElementId(element.id);
+        const elementPos = getElementPosition(element);
+        setDragOffset({
+          x: canvasPoint.x - elementPos.x,
+          y: canvasPoint.y - elementPos.y,
+        });
+        setDragStartPosition(elementPos);
+        
+        return true;
+      }
+    }
+    
+    // Deselect if tapping on empty space
+    setSelectedElementId(null);
+    cancelLongPressTimer();
+    return false;
+  }, [elements, canvasTransform, selectedTool, isDrawing, selectedElementId, startLongPressTimer, cancelLongPressTimer, findTextElementAtPoint]);
 
   // Handle element dragging
   const handleElementDrag = useCallback((x: number, y: number) => {
@@ -1110,6 +1233,9 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     
     // Cancel long press when dragging starts
     cancelLongPressTimer();
+    
+    // Hide text action menu when dragging starts
+    hideTextActionMenu();
     
     if (isResizing) {
       handleShapeResize(x, y);
@@ -1120,7 +1246,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       
       updateElementPosition(selectedElementId, newX, newY);
     }
-  }, [selectedElementId, isDragging, isResizing, dragOffset, canvasTransform, handleShapeResize, cancelLongPressTimer]);
+  }, [selectedElementId, isDragging, isResizing, dragOffset, canvasTransform, handleShapeResize, cancelLongPressTimer, hideTextActionMenu]);
 
   // Handle drag end
   const handleDragEnd = useCallback(() => {
@@ -1337,22 +1463,31 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         break;
 
       case 'text':
-        if (canDragInCurrentTool() && handleElementSelection(x, y)) {
-          const selectedElement = elements.find(el => el.id === selectedElementId);
-          if (selectedElement && selectedElement.type === 'text') {
-            const currentTime = Date.now();
-            if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
-              cancelLongPressTimer(); // Cancel long press if double click
-              handleTextEdit();
-              return;
-            } else {
-              setLastTapTime(currentTime);
-              setLastTapElementId(selectedElement.id);
-              setIsDragging(true);
-              return;
-            }
-          }
+        // Check if we're tapping on an existing text element
+        const foundTextElement = findTextElementAtPoint(x, y);
+        
+        if (foundTextElement) {
+          // SELECT EXISTING TEXT - Don't open modal, just select and show toolbar
+          setSelectedElementId(foundTextElement.id);
+          const elementPos = getElementPosition(foundTextElement);
+          const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+          setDragOffset({
+            x: canvasPoint.x - elementPos.x,
+            y: canvasPoint.y - elementPos.y,
+          });
+          setDragStartPosition(elementPos);
+          
+          // Show text action menu near the selected text
+          const textData = foundTextElement.data;
+          const textScreenX = (textData.x + foundTextElement.transform.translateX) * canvasTransform.scale + canvasTransform.translateX;
+          const textScreenY = (textData.y + foundTextElement.transform.translateY) * canvasTransform.scale + canvasTransform.translateY;
+          showTextActionMenuAt(textScreenX, textScreenY - 50);
+          
+          // Prepare for potential dragging but don't start it yet
+          return; // CRITICAL: Don't open text modal when selecting existing text
         }
+        
+        // ADD NEW TEXT - Only when tapping empty canvas with text tool active
         handleTextPlacement(x, y);
         break;
 
@@ -1389,6 +1524,23 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     const point = getPoint(evt, canvasViewRef);
     const { x, y } = point;
     const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+
+    // Check if we should start dragging a selected text element
+    if (!isDragging && selectedElementId && selectedTool === 'text' && dragStartPosition) {
+      const selectedElement = elements.find(el => el.id === selectedElementId);
+      if (selectedElement && selectedElement.type === 'text') {
+        // Start dragging if mouse moved enough from initial position
+        const dragDistance = Math.sqrt(
+          Math.pow(canvasPoint.x - (dragStartPosition.x + dragOffset.x), 2) + 
+          Math.pow(canvasPoint.y - (dragStartPosition.y + dragOffset.y), 2)
+        );
+        
+        if (dragDistance > 5) { // 5px threshold to start dragging
+          setIsDragging(true);
+          hideTextActionMenu(); // Hide menu when starting to drag
+        }
+      }
+    }
 
     if (isDragging) {
       handleElementDrag(x, y);
@@ -1681,27 +1833,31 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
           break;
 
         case 'text':
-          // First check if we can select an element (for editing existing text)
-          if (canDragInCurrentTool() && handleElementSelection(x, y)) {
-            const selectedElement = elements.find(el => el.id === selectedElementId);
-            if (selectedElement && selectedElement.type === 'text') {
-              // Check for double-tap to edit text
-              const currentTime = Date.now();
-              if (lastTapElementId === selectedElement.id && currentTime - lastTapTime < 500) {
-                // Double tap detected - edit text
-                cancelLongPressTimer(); // Cancel long press if double tap
-                handleTextEdit();
-                return;
-              } else {
-                // Single tap - prepare for dragging
-                setLastTapTime(currentTime);
-                setLastTapElementId(selectedElement.id);
-                setIsDragging(true);
-                return;
-              }
-            }
+          // Check if we're tapping on an existing text element
+          const foundTextElementPan = findTextElementAtPoint(x, y);
+          
+          if (foundTextElementPan) {
+            // SELECT EXISTING TEXT - Don't open modal, just select and show toolbar
+            setSelectedElementId(foundTextElementPan.id);
+            const elementPos = getElementPosition(foundTextElementPan);
+            const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+            setDragOffset({
+              x: canvasPoint.x - elementPos.x,
+              y: canvasPoint.y - elementPos.y,
+            });
+            setDragStartPosition(elementPos);
+            
+            // Show text action menu near the selected text
+            const textData = foundTextElementPan.data;
+            const textScreenX = (textData.x + foundTextElementPan.transform.translateX) * canvasTransform.scale + canvasTransform.translateX;
+            const textScreenY = (textData.y + foundTextElementPan.transform.translateY) * canvasTransform.scale + canvasTransform.translateY;
+            showTextActionMenuAt(textScreenX, textScreenY - 50);
+            
+            // Prepare for potential dragging but don't start it yet
+            return; // CRITICAL: Don't open text modal when selecting existing text
           }
-          // Otherwise place new text
+          
+          // ADD NEW TEXT - Only when tapping empty canvas with text tool active
           handleTextPlacement(x, y);
           break;
 
@@ -1784,6 +1940,23 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       // Single touch interactions
       if (touches.length === 1) {
         const canvasPoint = applyInverseTransform(x, y, canvasTransform);
+
+        // Check if we should start dragging a selected text element
+        if (!isDragging && selectedElementId && selectedTool === 'text' && dragStartPosition) {
+          const selectedElement = elements.find(el => el.id === selectedElementId);
+          if (selectedElement && selectedElement.type === 'text') {
+            // Start dragging if finger moved enough from initial position
+            const dragDistance = Math.sqrt(
+              Math.pow(canvasPoint.x - (dragStartPosition.x + dragOffset.x), 2) + 
+              Math.pow(canvasPoint.y - (dragStartPosition.y + dragOffset.y), 2)
+            );
+            
+            if (dragDistance > 5) { // 5px threshold to start dragging
+              setIsDragging(true);
+              hideTextActionMenu(); // Hide menu when starting to drag
+            }
+          }
+        }
 
         if (isDragging) {
           // Handle element dragging
@@ -2188,6 +2361,32 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         onResetZoom={resetZoom}
       />
 
+      {/* Text Action Menu */}
+      {showTextActionMenu && (
+        <View
+          style={[
+            styles.textActionMenu,
+            {
+              left: Math.max(10, Math.min(textActionMenuPosition.x - 100, SCREEN_WIDTH - 210)),
+              top: Math.max(80, Math.min(textActionMenuPosition.y, SCREEN_HEIGHT - 200)),
+            },
+          ]}
+        >
+          <TouchableOpacity style={styles.textActionButton} onPress={handleTextActionEdit}>
+            <Text style={styles.textActionButtonText}>✏️ Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.textActionButton} onPress={handleTextActionAdd}>
+            <Text style={styles.textActionButtonText}>➕ Add</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.textActionButton} onPress={handleTextActionDelete}>
+            <Text style={styles.textActionButtonText}>🗑 Delete</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.textActionButton} onPress={handleTextActionExit}>
+            <Text style={styles.textActionButtonText}>❌ Exit</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Text Input Modal */}
       <TextInputModal
         visible={showTextModal}
@@ -2243,6 +2442,37 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.3,
     shadowRadius: 2,
+  },
+  textActionMenu: {
+    position: 'absolute',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 8,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    flexDirection: 'row',
+    gap: 4,
+    zIndex: 1000,
+  },
+  textActionButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    minWidth: 60,
+    alignItems: 'center',
+  },
+  textActionButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
   },
 });
 

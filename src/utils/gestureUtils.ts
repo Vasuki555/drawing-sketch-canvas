@@ -14,7 +14,7 @@ export const getPoint = (evt: any, canvasRef?: any): { x: number; y: number } =>
     };
   }
   
-  // Native touch handling
+  // Native touch handling - use locationX/locationY which are relative to the receiving view
   return {
     x: evt.nativeEvent.locationX || 0,
     y: evt.nativeEvent.locationY || 0,
