@@ -19,12 +19,14 @@ import { useFocusEffect } from '@react-navigation/native';
 import { getSavedDrawings, deleteDrawing, saveDrawingsIndexLocal } from '../utils/saveDrawing';
 import { SavedDrawing, ensureDrawingTitle } from '../types/Drawing';
 import { useSettings } from '../contexts/SettingsContext';
+import { useAuth } from '../contexts/AuthContext';
 
 const { width, height } = Dimensions.get('window');
 const ITEM_SIZE = (width - 48) / 2; // 2 columns with padding
 
 export default function GalleryScreen({ navigation }: any) {
   const { settings, theme } = useSettings();
+  const { userId } = useAuth();
   const [drawings, setDrawings] = useState<SavedDrawing[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -42,7 +44,7 @@ export default function GalleryScreen({ navigation }: any) {
   // Load saved drawings
   const loadDrawings = async () => {
     try {
-      const savedDrawings = await getSavedDrawings();
+      const savedDrawings = await getSavedDrawings(userId || undefined);
       // Ensure all drawings have proper titles (backward compatibility)
       const drawingsWithTitles = savedDrawings.map(ensureDrawingTitle);
       
@@ -104,7 +106,7 @@ export default function GalleryScreen({ navigation }: any) {
             try {
               // Delete all selected drawings
               for (const drawingId of selectedIds) {
-                await deleteDrawing(drawingId);
+                await deleteDrawing(drawingId, userId || undefined);
               }
               
               // Exit selection mode and reload
@@ -222,7 +224,7 @@ export default function GalleryScreen({ navigation }: any) {
           onPress: async () => {
             try {
               // Use the backend-aware delete function
-              await deleteDrawing(drawingToDelete.id);
+              await deleteDrawing(drawingToDelete.id, userId || undefined);
               
               // Reload drawings to reflect changes
               await loadDrawings();
@@ -260,7 +262,7 @@ export default function GalleryScreen({ navigation }: any) {
               // Delete all drawings one by one to ensure backend sync
               const allDrawings = await getSavedDrawings();
               for (const drawing of allDrawings) {
-                await deleteDrawing(drawing.id);
+                await deleteDrawing(drawing.id, userId || undefined);
               }
               
               setDrawings([]);

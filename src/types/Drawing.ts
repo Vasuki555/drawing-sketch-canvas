@@ -59,6 +59,7 @@ export interface TextElement extends DrawingElement {
 export interface DrawingState {
   id: string;
   name: string; // This serves as the drawing title
+  userId?: string; // Firebase user ID - optional for backward compatibility
   elements: DrawingElement[];
   backgroundColor: string;
   canvasTransform: Transform;
@@ -72,6 +73,7 @@ export interface DrawingState {
 export interface SavedDrawing {
   id: string;
   name: string; // This serves as the drawing title
+  userId?: string; // Firebase user ID - optional for backward compatibility
   previewUri: string;
   stateUri: string;
   createdAt: number;

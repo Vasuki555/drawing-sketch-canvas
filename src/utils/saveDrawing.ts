@@ -1,9 +1,10 @@
-// Save drawing utilities with backend integration
+// Save drawing utilities with Firebase cloud storage integration
 
 import { Paths, File, Directory } from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DrawingState, SavedDrawing } from '../types/Drawing';
 import { drawingApi } from '../services/api';
+import { CloudStorageService } from '../services/cloudStorage';
 
 const DRAWINGS_FOLDER = 'drawings';
 const PREVIEW_FILENAME = 'preview.png';
@@ -93,12 +94,13 @@ const saveDrawingsIndexLocal = async (index: SavedDrawing[]): Promise<void> => {
   }
 };
 
-// Save complete drawing with backend integration
+// Save complete drawing with Firebase cloud storage integration
 export const saveDrawing = async (
   drawingId: string,
   name: string,
   previewImageUri: string,
-  state: DrawingState
+  state: DrawingState,
+  userId?: string
 ): Promise<void> => {
   try {
     // Validate inputs
@@ -113,34 +115,58 @@ export const saveDrawing = async (
     }
 
     let savedDrawing: SavedDrawing | null = null;
-    let useBackend = false;
+    let useCloud = false;
 
-    // Try backend first
-    try {
-      const isHealthy = await drawingApi.isHealthy();
-      if (isHealthy) {
-        // Check if this is an update (drawing exists in backend)
-        const existingDrawings = await getDrawingsIndexLocal();
-        const existingDrawing = existingDrawings.find(d => d.id === drawingId);
-        const isUpdate = existingDrawing && existingDrawing.stateUri.startsWith('api:');
-
-        if (isUpdate) {
-          // Update existing drawing
-          savedDrawing = await drawingApi.updateDrawing(drawingId, name, previewImageUri, state);
-        } else {
-          // Create new drawing
-          savedDrawing = await drawingApi.createDrawing(name, previewImageUri, state);
-        }
+    // Try Firebase cloud storage first if user is authenticated
+    if (userId) {
+      try {
+        await CloudStorageService.saveDrawing(userId, drawingId, name, previewImageUri, state);
         
-        useBackend = true;
-        console.log(`Successfully saved drawing to backend: ${drawingId}`);
+        savedDrawing = {
+          id: drawingId,
+          name,
+          userId,
+          previewUri: previewImageUri,
+          stateUri: 'cloud:' + drawingId, // Indicate this is stored in cloud
+          createdAt: state.createdAt,
+          updatedAt: Date.now(),
+          hasState: true,
+        };
+        
+        useCloud = true;
+        console.log(`Successfully saved drawing to Firebase: ${drawingId}`);
+      } catch (error) {
+        console.warn('Firebase save failed, trying backend:', error);
       }
-    } catch (error) {
-      console.warn('Backend save failed, falling back to local storage:', error);
     }
 
-    // Fallback to local storage if backend failed
-    if (!useBackend || !savedDrawing) {
+    // Try backend if cloud failed or user not authenticated
+    if (!useCloud) {
+      try {
+        const isHealthy = await drawingApi.isHealthy();
+        if (isHealthy) {
+          // Check if this is an update (drawing exists in backend)
+          const existingDrawings = await getDrawingsIndexLocal();
+          const existingDrawing = existingDrawings.find(d => d.id === drawingId);
+          const isUpdate = existingDrawing && existingDrawing.stateUri.startsWith('api:');
+
+          if (isUpdate) {
+            // Update existing drawing
+            savedDrawing = await drawingApi.updateDrawing(drawingId, name, previewImageUri, state);
+          } else {
+            // Create new drawing
+            savedDrawing = await drawingApi.createDrawing(name, previewImageUri, state);
+          }
+          
+          console.log(`Successfully saved drawing to backend: ${drawingId}`);
+        }
+      } catch (error) {
+        console.warn('Backend save failed, falling back to local storage:', error);
+      }
+    }
+
+    // Fallback to local storage if both cloud and backend failed
+    if (!savedDrawing) {
       const previewUri = await savePreviewImageLocal(drawingId, previewImageUri);
       const stateUri = await saveDrawingStateLocal(drawingId, state);
       
@@ -150,6 +176,7 @@ export const saveDrawing = async (
       savedDrawing = {
         id: drawingId,
         name,
+        userId,
         previewUri,
         stateUri,
         createdAt: existingIndex >= 0 ? index[existingIndex].createdAt : Date.now(),
@@ -188,14 +215,24 @@ export const saveDrawing = async (
   }
 };
 
-// Delete drawing with backend integration
-export const deleteDrawing = async (drawingId: string): Promise<void> => {
+// Delete drawing with Firebase cloud storage integration
+export const deleteDrawing = async (drawingId: string, userId?: string): Promise<void> => {
   try {
     const localIndex = await getDrawingsIndexLocal();
     const drawing = localIndex.find(d => d.id === drawingId);
     
+    // Try Firebase cloud deletion if drawing is stored in cloud
+    if (drawing && drawing.stateUri.startsWith('cloud:') && userId) {
+      try {
+        await CloudStorageService.deleteDrawing(drawingId, userId);
+        console.log(`Successfully deleted drawing from Firebase: ${drawingId}`);
+      } catch (error) {
+        console.warn('Firebase delete failed:', error);
+      }
+    }
+    
     // Try backend deletion if drawing is stored in backend
-    if (drawing && drawing.stateUri.startsWith('api:')) {
+    else if (drawing && drawing.stateUri.startsWith('api:')) {
       try {
         const isHealthy = await drawingApi.isHealthy();
         if (isHealthy) {
@@ -224,21 +261,34 @@ export const deleteDrawing = async (drawingId: string): Promise<void> => {
   }
 };
 
-// Get all saved drawings with backend integration
-export const getSavedDrawings = async (): Promise<SavedDrawing[]> => {
+// Get all saved drawings with Firebase cloud storage integration
+export const getSavedDrawings = async (userId?: string): Promise<SavedDrawing[]> => {
   try {
     let allDrawings: SavedDrawing[] = [];
     
-    // Try to get drawings from backend first
-    try {
-      const isHealthy = await drawingApi.isHealthy();
-      if (isHealthy) {
-        const backendDrawings = await drawingApi.getDrawings();
-        allDrawings = [...backendDrawings];
-        console.log(`Loaded ${backendDrawings.length} drawings from backend`);
+    // Try to get drawings from Firebase cloud first if user is authenticated
+    if (userId) {
+      try {
+        const cloudDrawings = await CloudStorageService.getUserDrawings(userId);
+        allDrawings = [...cloudDrawings];
+        console.log(`Loaded ${cloudDrawings.length} drawings from Firebase`);
+      } catch (error) {
+        console.warn('Failed to load drawings from Firebase:', error);
       }
-    } catch (error) {
-      console.warn('Failed to load drawings from backend:', error);
+    }
+    
+    // Try to get drawings from backend
+    if (allDrawings.length === 0) {
+      try {
+        const isHealthy = await drawingApi.isHealthy();
+        if (isHealthy) {
+          const backendDrawings = await drawingApi.getDrawings();
+          allDrawings = [...backendDrawings];
+          console.log(`Loaded ${backendDrawings.length} drawings from backend`);
+        }
+      } catch (error) {
+        console.warn('Failed to load drawings from backend:', error);
+      }
     }
     
     // Get local drawings
@@ -246,8 +296,8 @@ export const getSavedDrawings = async (): Promise<SavedDrawing[]> => {
     const localDrawings: SavedDrawing[] = [];
     
     for (const drawing of localIndex) {
-      // Skip if this drawing is already loaded from backend
-      if (drawing.stateUri.startsWith('api:')) {
+      // Skip if this drawing is already loaded from cloud or backend
+      if (drawing.stateUri.startsWith('cloud:') || drawing.stateUri.startsWith('api:')) {
         continue;
       }
       
@@ -267,15 +317,19 @@ export const getSavedDrawings = async (): Promise<SavedDrawing[]> => {
       }
     }
     
-    // Combine backend and local drawings
+    // Combine cloud, backend and local drawings
     allDrawings = [...allDrawings, ...localDrawings];
     
-    // Remove duplicates (prefer backend version)
+    // Remove duplicates (prefer cloud > backend > local)
     const uniqueDrawings = allDrawings.reduce((acc, drawing) => {
       const existing = acc.find(d => d.id === drawing.id);
       if (!existing) {
         acc.push(drawing);
-      } else if (drawing.stateUri.startsWith('api:') && !existing.stateUri.startsWith('api:')) {
+      } else if (drawing.stateUri.startsWith('cloud:') && !existing.stateUri.startsWith('cloud:')) {
+        // Replace backend/local with cloud version
+        const index = acc.findIndex(d => d.id === drawing.id);
+        acc[index] = drawing;
+      } else if (drawing.stateUri.startsWith('api:') && !existing.stateUri.startsWith('cloud:') && !existing.stateUri.startsWith('api:')) {
         // Replace local with backend version
         const index = acc.findIndex(d => d.id === drawing.id);
         acc[index] = drawing;

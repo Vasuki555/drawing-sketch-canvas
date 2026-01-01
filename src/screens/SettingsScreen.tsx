@@ -10,9 +10,33 @@ import {
 } from "react-native";
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSettings } from '../contexts/SettingsContext';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function SettingsScreen({ navigation }: any) {
   const { settings, updateSetting, resetSettings, isLoading, theme } = useSettings();
+  const { logout, currentUser } = useAuth();
+
+  const handleLogout = () => {
+    Alert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await logout();
+              // Navigation will be handled by auth state change
+            } catch (error: any) {
+              Alert.alert('Error', 'Failed to sign out: ' + error.message);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const handleResetSettings = () => {
     Alert.alert(
@@ -229,6 +253,42 @@ export default function SettingsScreen({ navigation }: any) {
               thumbColor={settings.autoSave ? '#ffffff' : '#f3f4f6'}
             />
           </View>
+        </View>
+
+        {/* Account Section */}
+        <View style={[styles.section, { backgroundColor: theme.surface }]}>
+          <Text style={[styles.sectionTitle, { color: theme.primary }]}>Account</Text>
+          
+          <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
+            <View style={styles.settingInfo}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>Email</Text>
+              <Text style={[styles.settingDescription, { color: theme.textSecondary }]}>
+                {currentUser?.email || 'Not available'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.settingRow, { borderBottomColor: theme.border }]}>
+            <View style={styles.settingInfo}>
+              <Text style={[styles.settingLabel, { color: theme.text }]}>Display Name</Text>
+              <Text style={[styles.settingDescription, { color: theme.textSecondary }]}>
+                {currentUser?.displayName || 'Not set'}
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity 
+            style={[styles.settingRow, { borderBottomColor: 'transparent' }]}
+            onPress={handleLogout}
+          >
+            <View style={styles.settingInfo}>
+              <Text style={[styles.settingLabel, { color: '#dc2626' }]}>Sign Out</Text>
+              <Text style={[styles.settingDescription, { color: theme.textSecondary }]}>
+                Sign out of your account
+              </Text>
+            </View>
+            <Text style={[styles.settingValue, { color: '#dc2626' }]}>→</Text>
+          </TouchableOpacity>
         </View>
 
         {/* App Info Section */}

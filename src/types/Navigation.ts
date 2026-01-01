@@ -2,7 +2,13 @@
 
 export type RootStackParamList = {
   Splash: undefined;
+  AuthStack: undefined;
   MainStack: undefined;
+};
+
+export type AuthStackParamList = {
+  Login: undefined;
+  Register: undefined;
 };
 
 export type MainStackParamList = {

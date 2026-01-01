@@ -1,8 +1,9 @@
-// Load drawing utilities with backend integration
+// Load drawing utilities with Firebase cloud storage integration
 
 import { File } from 'expo-file-system';
 import { DrawingState } from '../types/Drawing';
 import { drawingApi } from '../services/api';
+import { CloudStorageService } from '../services/cloudStorage';
 
 // Validate drawing state
 const isValidDrawingState = (state: any): state is DrawingState => {
@@ -17,9 +18,38 @@ const isValidDrawingState = (state: any): state is DrawingState => {
          typeof state.updatedAt === 'number';
 };
 
-// Load drawing state from JSON file or API
-export const loadDrawingState = async (stateUri: string): Promise<DrawingState | null> => {
+// Load drawing state from JSON file, API, or Firebase cloud
+export const loadDrawingState = async (stateUri: string, userId?: string): Promise<DrawingState | null> => {
   try {
+    // Check if this is a Firebase cloud-stored drawing
+    if (stateUri.startsWith('cloud:')) {
+      const drawingId = stateUri.replace('cloud:', '');
+      
+      if (!userId) {
+        console.warn('User ID required for loading cloud drawing');
+        return null;
+      }
+      
+      try {
+        const state = await CloudStorageService.getDrawing(drawingId, userId);
+        
+        if (!state) {
+          console.warn('Drawing not found in cloud');
+          return null;
+        }
+        
+        if (!isValidDrawingState(state)) {
+          console.warn('Invalid drawing state format from cloud');
+          return null;
+        }
+        
+        return state;
+      } catch (error) {
+        console.error('Error loading drawing state from cloud:', error);
+        return null;
+      }
+    }
+    
     // Check if this is an API-stored drawing
     if (stateUri.startsWith('api:')) {
       const drawingId = stateUri.replace('api:', '');

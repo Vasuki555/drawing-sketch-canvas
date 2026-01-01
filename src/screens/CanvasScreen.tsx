@@ -20,6 +20,7 @@ import { loadDrawingState, generateId, createDefaultTransform } from '../utils/l
 import { SOLID_COLORS, DEFAULT_STROKE_COLOR } from '../constants/colors';
 import { getPoint, isPathClosed, extractPathCoordinates } from '../utils/gestureUtils';
 import { useSettings } from '../contexts/SettingsContext';
+import { useAuth } from '../contexts/AuthContext';
 import Canvas, { CanvasRef } from '../components/Canvas';
 import Toolbar from '../components/ToolBar';
 import TopBar from '../components/TopBar';
@@ -34,8 +35,9 @@ interface CanvasScreenProps {
 }
 
 const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
-  // Get settings from context
+  // Get settings and auth from context
   const { settings, theme } = useSettings();
+  const { userId } = useAuth();
   
   // Route params for edit mode
   const editMode = route?.params?.editMode || false;
@@ -265,7 +267,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
     const initializeCanvas = async () => {
       if (editMode && stateUri) {
         try {
-          const state = await loadDrawingState(stateUri);
+          const state = await loadDrawingState(stateUri, userId || undefined);
           if (state) {
             setElements(state.elements);
             setBackgroundColor(state.backgroundColor); // Keep existing drawing's background
@@ -1004,7 +1006,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
         };
 
         // Auto-save the drawing (will update existing or create new)
-        await saveDrawing(finalDrawingId, state.name, imageUri, state);
+        await saveDrawing(finalDrawingId, state.name, imageUri, state, userId || undefined);
         console.log('Auto-saved drawing with ID:', finalDrawingId);
       } catch (error) {
         console.error('Auto-save failed:', error);
@@ -2224,7 +2226,7 @@ const CanvasScreen: React.FC<CanvasScreenProps> = ({ navigation, route }) => {
       };
 
       // Save the drawing (this handles both new and existing drawings)
-      await saveDrawing(finalDrawingId, state.name, imageUri, state);
+      await saveDrawing(finalDrawingId, state.name, imageUri, state, userId || undefined);
 
       Alert.alert(
         'Success',

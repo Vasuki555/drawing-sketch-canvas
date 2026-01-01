@@ -1,10 +1,13 @@
 import React, { useEffect, useRef } from "react";
 import { View, Text, StyleSheet, Animated, Platform } from "react-native";
 import LottieView from 'lottie-react-native';
+import { useAuth } from "../contexts/AuthContext";
+import { CommonActions } from '@react-navigation/native';
 
 export default function SplashScreen({ navigation }: any) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
+  const { isAuthenticated, isLoading } = useAuth();
 
   useEffect(() => {
     // Start animations
@@ -22,13 +25,36 @@ export default function SplashScreen({ navigation }: any) {
       }),
     ]).start();
 
-    // Navigate to MainStack after 3 seconds (shorter for web)
+    // Navigate after animations and auth check
     const timer = setTimeout(() => {
-      navigation.replace("MainStack");
-    }, Platform.OS === 'web' ? 2000 : 5000);
+      if (!isLoading) {
+        // Check for demo mode
+        const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+        
+        console.log('Splash navigation check:', { isDemoMode, isAuthenticated, isLoading });
+        
+        if (isDemoMode || isAuthenticated) {
+          // Go to main app
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'MainStack' }],
+            })
+          );
+        } else {
+          // Go to authentication
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'AuthStack' }],
+            })
+          );
+        }
+      }
+    }, 2500); // 2.5 seconds for splash
 
     return () => clearTimeout(timer);
-  }, [navigation, fadeAnim, scaleAnim]);
+  }, [navigation, fadeAnim, scaleAnim, isAuthenticated, isLoading]);
 
   return (
     <View style={styles.container}>
@@ -110,4 +136,3 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 });
-

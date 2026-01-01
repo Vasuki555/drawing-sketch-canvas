@@ -1,21 +1,22 @@
 import React from "react";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import SplashScreen from "../screens/SplashScreen";
+import { ActivityIndicator, View } from "react-native";
+
 import HomeScreen from "../screens/HomeScreen";
 import CanvasScreen from "../screens/CanvasScreen";
 import GalleryScreen from "../screens/GalleryScreen";
 import SettingsScreen from "../screens/SettingsScreen";
 
+import AuthNavigator from "./AuthNavigator";
+import { useAuth } from "../contexts/AuthContext";
+
 const RootStack = createNativeStackNavigator();
 const MainStack = createNativeStackNavigator();
 
-// Main app screens (after splash)
+/* ---------------- MAIN APP STACK ---------------- */
 function MainStackNavigator() {
   return (
-    <MainStack.Navigator 
-      screenOptions={{ headerShown: false }}
-      initialRouteName="Home"
-    >
+    <MainStack.Navigator screenOptions={{ headerShown: false }}>
       <MainStack.Screen name="Home" component={HomeScreen} />
       <MainStack.Screen name="Canvas" component={CanvasScreen} />
       <MainStack.Screen name="Gallery" component={GalleryScreen} />
@@ -24,31 +25,31 @@ function MainStackNavigator() {
   );
 }
 
-// Root navigator with splash screen
+/* ---------------- ROOT STACK ---------------- */
 export default function StackNavigator() {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  // Check for demo mode
+  const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+
+  // Show loading screen while checking auth state
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#1e1b4b" }}>
+        <ActivityIndicator size="large" color="#007AFF" />
+      </View>
+    );
+  }
+
   return (
-    <RootStack.Navigator 
-      screenOptions={{ headerShown: false }}
-      initialRouteName="Splash"
-    >
-      {/* Splash Screen - Shows only on app launch */}
-      <RootStack.Screen 
-        name="Splash" 
-        component={SplashScreen}
-        options={{
-          gestureEnabled: false, // Disable swipe gestures
-          animation: 'fade', // Smooth fade transition
-        }}
-      />
-      {/* Main App Stack - Contains all main screens */}
-      <RootStack.Screen 
-        name="MainStack" 
-        component={MainStackNavigator}
-        options={{
-          gestureEnabled: false, // Prevent going back to splash
-          animation: 'slide_from_right', // Smooth transition from splash
-        }}
-      />
+    <RootStack.Navigator screenOptions={{ headerShown: false }}>
+      {isDemoMode || isAuthenticated ? (
+        // User is authenticated or in demo mode - show main app
+        <RootStack.Screen name="MainStack" component={MainStackNavigator} />
+      ) : (
+        // User is not authenticated - show auth screens
+        <RootStack.Screen name="AuthStack" component={AuthNavigator} />
+      )}
     </RootStack.Navigator>
   );
 }
